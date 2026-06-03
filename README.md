@@ -37,7 +37,7 @@ Requires Node.js ≥ 20, with no runtime dependencies. Try it without installing
 
 ### Skills (optional, for agents such as Claude Code)
 
-Inlay ships 4 enhanced skills inside the npm package (see the **Skills** section below). Drop them into your agent's skills directory and you can invoke them in chat via slash commands like `/inlay-grill-with-docs`, `/inlay-context-aggregate`.
+Inlay ships 6 skills inside the npm package (see the **Skills** section below). Drop them into your agent's skills directory and you can invoke them in chat via slash commands like `/inlay-grill-with-docs`, `/inlay-context-aggregate`.
 
 ```bash
 # After installing the CLI globally, the skills live in the global npm dir
@@ -199,7 +199,7 @@ global: --json   machine-readable output (with data / status / ts / sessionId)
 
 ## Skills (multi-user enhanced workflow)
 
-`skills/` provides 4 skills that plug mattpocock's approach into the Inlay pipeline (side effects routed through the CLI, reads scoped per user):
+`skills/` provides 6 skills. Four are working skills that plug mattpocock's approach into the Inlay pipeline (side effects routed through the CLI, reads scoped per user); two are guidance skills that teach the agent how to drive Inlay correctly:
 
 | Skill | Purpose |
 |---|---|
@@ -207,6 +207,8 @@ global: --json   machine-readable output (with data / status / ts / sessionId)
 | `inlay-improve-codebase-architecture` | Architecture deepening review (HTML report + grilling), side effects via the CLI |
 | `inlay-context-aggregate` | LLM-merge personal staged terms → public doc, surface conflicts, reset after promotion |
 | `inlay-migrate` | Migrate an existing mattpocock-style repo to Inlay layout, with an HTML migration report |
+| `inlay-cli-guide` | Reference for driving the Inlay CLI: exact commands, flags, exit-code handling, evidence-driven rules |
+| `inlay-workflow` | Inlay's workflow & guiding philosophy; routes to the right skill and reminds the user to use Inlay properly |
 
 ---
 

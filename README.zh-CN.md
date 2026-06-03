@@ -37,7 +37,7 @@ inlay --help
 
 ### Skills（可选，供 Claude Code 等 Agent 使用）
 
-Inlay 随 npm 包一起分发 4 个增强版 Skill（见下文 **Skills** 一节）。把它们装进 Agent 的技能目录后，即可在对话中用 `/inlay-grill-with-docs`、`/inlay-context-aggregate` 等斜杠命令调用。
+Inlay 随 npm 包一起分发 6 个 Skill（见下文 **Skills** 一节）。把它们装进 Agent 的技能目录后，即可在对话中用 `/inlay-grill-with-docs`、`/inlay-context-aggregate` 等斜杠命令调用。
 
 ```bash
 # 全局安装 CLI 后，skills 位于 npm 全局目录
@@ -199,7 +199,7 @@ inlay dashboard [--no-open] [--out <dir>] 只读控制面板（临时 HTML）
 
 ## Skills（多人增强版工作流）
 
-`skills/` 下提供 4 个 Skill，把 mattpocock 的思路接入 Inlay 管线（写入改道经 CLI、读取范围隔离）：
+`skills/` 下提供 6 个 Skill。四个是接入 Inlay 管线的工作 Skill（写入改道经 CLI、读取范围隔离），两个是指导 Agent 正确使用 Inlay 的指南 Skill：
 
 | Skill | 作用 |
 |---|---|
@@ -207,6 +207,8 @@ inlay dashboard [--no-open] [--out <dir>] 只读控制面板（临时 HTML）
 | `inlay-improve-codebase-architecture` | 架构深化评审（HTML 报告 + grilling），副作用经 CLI |
 | `inlay-context-aggregate` | LLM 合并个人暂存术语 → 公共文档，标出冲突、提升后重置 |
 | `inlay-migrate` | 把现有 mattpocock 工作流文档无缝迁移为 Inlay 版本，并输出迁移报告 |
+| `inlay-cli-guide` | Inlay CLI 操作指南：精确命令、参数、退出码处理、Evidence-Driven 规则 |
+| `inlay-workflow` | Inlay 工作流与指导思想；路由到正确的 Skill，并在必要时提醒用户规范使用 |
 
 ---
 
