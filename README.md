@@ -4,25 +4,27 @@
 [![license](https://img.shields.io/npm/l/@lim-young/inlay.svg)](./LICENSE)
 [![node](https://img.shields.io/node/v/@lim-young/inlay.svg)](https://nodejs.org)
 
-**Inlay** 是一套面向「人 + Agent」团队的协作流程管线，专注管理两类最有价值的工程产物：**ADR**（架构决策记录）与 **Context**（团队术语表 / 通用语言），让多人异步并发地产出这些文档时**零合并冲突**。它源自 [mattpocock 的 Skill 工作流](https://github.com/mattpocock/skills)（`grill-with-docs`、`improve-codebase-architecture`），并将其从个人向扩展为团队协作流程。
+**English** | [简体中文](./README.zh-CN.md)
 
-> spec（规格）交给 [OpenSpec](https://github.com/Fission-AI/OpenSpec)；Inlay **不碰 spec**，只管 ADR + Context。
+**Inlay** is a collaboration pipeline for human + agent teams that manages the two most valuable engineering artifacts — **ADRs** (Architecture Decision Records) and **Context** (the team glossary / ubiquitous language) — so that many people can produce them asynchronously and concurrently with **zero merge conflicts**. It grows out of [mattpocock's skill workflow](https://github.com/mattpocock/skills) (`grill-with-docs`, `improve-codebase-architecture`) and extends it from a solo workflow into a team one.
 
----
-
-## 第一性原理
-
-> **任何「共享且会被多人并发修改的单一文件」都是冲突源。**
-
-由此推导出 Inlay 的核心做法：
-
-- **一实体一文件（append-only 友好）** —— 工作区、用户、ADR 各自独立成文件，多人并发产出天然不冲突（不靠全局连续编号）。
-- **派生即可丢弃** —— 索引、聚合视图、控制面板等派生物可随时重建，**不进版本控制**。
-- **Evidence-Driven** —— Agent 对状态的任何断言，必须来自当前会话内一次真实 `inlay` CLI 调用的输出（带时间戳 + sessionId），杜绝凭记忆臆断。
+> Specs are handled by [OpenSpec](https://github.com/Fission-AI/OpenSpec); Inlay **stays out of specs** and owns only ADR + Context.
 
 ---
 
-## 安装
+## First Principle
+
+> **Any single file that is shared and concurrently modified by multiple people is a source of conflict.**
+
+Everything in Inlay follows from this:
+
+- **One entity, one file (append-only friendly)** — workspaces, users, and ADRs each live in their own file, so concurrent output never collides (no global sequential numbering).
+- **Derived is disposable** — indexes, aggregated views, and the dashboard can be rebuilt anytime and are **excluded from version control**.
+- **Evidence-driven** — any claim an agent makes about state must come from a real `inlay` CLI call made in the current session (stamped with timestamp + sessionId), never from memory.
+
+---
+
+## Install
 
 ### CLI
 
@@ -31,258 +33,258 @@ npm install -g @lim-young/inlay
 inlay --help
 ```
 
-要求 Node.js ≥ 20，无运行时依赖。免安装试用：`npx @lim-young/inlay <command>`。
+Requires Node.js ≥ 20, with no runtime dependencies. Try it without installing: `npx @lim-young/inlay <command>`.
 
-### Skills（可选，供 Claude Code 等 Agent 使用）
+### Skills (optional, for agents such as Claude Code)
 
-Inlay 随 npm 包一起分发 4 个增强版 Skill（见下文 **Skills** 一节）。把它们装进 Agent 的技能目录后，即可在对话中用 `/inlay-grill-with-docs`、`/inlay-context-aggregate` 等斜杠命令调用。
+Inlay ships 4 enhanced skills inside the npm package (see the **Skills** section below). Drop them into your agent's skills directory and you can invoke them in chat via slash commands like `/inlay-grill-with-docs`, `/inlay-context-aggregate`.
 
 ```bash
-# 全局安装 CLI 后，skills 位于 npm 全局目录
+# After installing the CLI globally, the skills live in the global npm dir
 SKILLS_SRC="$(npm root -g)/@lim-young/inlay/skills"
 
-# Claude Code · 项目级（随项目共享，推荐）
+# Claude Code · project-level (shared with the repo, recommended)
 mkdir -p .claude/skills && cp -r "$SKILLS_SRC"/* .claude/skills/
 
-# Claude Code · 用户级（对所有项目生效）
+# Claude Code · user-level (available across all projects)
 mkdir -p ~/.claude/skills && cp -r "$SKILLS_SRC"/* ~/.claude/skills/
 ```
 
-> Windows PowerShell：`Copy-Item -Recurse "$(npm root -g)\@lim-young\inlay\skills\*" .claude\skills\`
-> 也可不装 CLI，直接从仓库拷贝 `skills/` 目录。
+> Windows PowerShell: `Copy-Item -Recurse "$(npm root -g)\@lim-young\inlay\skills\*" .claude\skills\`
+> You can also skip the CLI and copy the `skills/` directory straight from the repo.
 
 ---
 
-## 使用示例
+## Walkthrough
 
-下面以「三人协作编写一个哈希计算器」为例。三个用户：`alice`、`bob`，以及你本机（`inlay whoami` 自动取计算机用户名）。
+A worked example: three people collaborate on a hash calculator. The three users are `alice`, `bob`, and your own machine (`inlay whoami` picks up the OS username automatically).
 
-### 1. 初始化项目
+### 1. Initialize the project
 
 ```bash
 cd your-project
 inlay init
 ```
 
-`init` 会：创建 `Workspaces/` 骨架、写好忽略规则（排除派生物），并把 **Inlay 指引块**幂等注入 `AGENTS.md` 与 `CLAUDE.md`（已有文件则只替换标记块、不动其余内容）。
+`init` creates the `Workspaces/` skeleton, writes ignore rules (excluding derived files), and idempotently injects the **Inlay guidance block** into `AGENTS.md` and `CLAUDE.md` (if a file exists, only the marked block is replaced — everything else is untouched).
 
-### 2. 确认身份（自动注册）
+### 2. Confirm identity (auto-registers)
 
 ```bash
 inlay whoami
-# → 解析当前用户（计算机用户名）并自动注册为 Workspaces/_users/<you>.json
+# → resolves the current user (OS username) and auto-registers Workspaces/_users/<you>.json
 inlay user list
 ```
 
-> 想以别的身份操作（例如在一台机器上模拟队友），设置环境变量 `INLAY_USER`：
+> To act as a different identity (e.g. to simulate a teammate on one machine), set `INLAY_USER`:
 > ```bash
-> INLAY_USER=alice inlay whoami     # 解析并注册 alice
+> INLAY_USER=alice inlay whoami     # resolve and register alice
 > ```
 
-### 3. 创建并进入工作区
+### 3. Create and enter a workspace
 
 ```bash
 inlay ws create hashcalc --title "Hash Calculator"
-inlay ws use hashcalc        # 设为当前会话的工作区
-inlay ws resolve             # 确认当前工作区（启动协议第一步）
+inlay ws use hashcalc        # set the workspace for this session
+inlay ws resolve             # confirm the current workspace (first step of the startup protocol)
 ```
 
-### 4. 记录一条 ADR
+### 4. Record an ADR
 
 ```bash
 inlay adr new --title "Use Node crypto for hashing" --status accepted
-# → 生成 Workspaces/hashcalc/adr/ADR-<date>-<id>-use-node-crypto-for-hashing.md
-#   front-matter 自动写入 createdBy（= whoami）、随机 id（无全局计数器，并发零冲突）
+# → creates Workspaces/hashcalc/adr/ADR-<date>-<id>-use-node-crypto-for-hashing.md
+#   front-matter is filled in automatically: createdBy (= whoami), a random id (no global counter, conflict-free)
 ```
 
-随后把 1–3 句「背景 / 决策 / 为什么」写进生成的文件。引用其它 ADR 用其 id：
+Then write 1–3 sentences (context / decision / why) into the generated file. Reference other ADRs by their id:
 
 ```bash
 inlay adr new --title "Stream large files for hashing" --related <other-adr-id>
-inlay adr touch <id>     # 编辑既有 ADR 后，记录你为修改者（modifiedBy）
-inlay adr list           # 查看全部（以 id 为主键）
-inlay adr verify         # 校验 id 唯一性 / 引用有效 / 标题失配（提交前手工跑）
+inlay adr touch <id>     # after editing an existing ADR, record yourself as a modifier (modifiedBy)
+inlay adr list           # list all (keyed by id)
+inlay adr verify         # check id uniqueness / reference validity / title mismatch (run before commit)
 ```
 
-### 5. 起草术语（写自己的暂存，零冲突）
+### 5. Draft terminology (write your own staging doc, conflict-free)
 
 ```bash
-inlay context add        # 打开/初始化 你自己的 users/<you>/CONTEXT.md
+inlay context add        # open/initialize your own users/<you>/CONTEXT.md
 ```
 
-在你的暂存文档的 `## Language` 段里定义术语（每个术语 1–2 句，同义词放 `_Avoid_`）。**你只能写自己的暂存文档**，直接写公共 `CONTEXT.md` 会被守卫拦截（exit 40）。
+Define terms in the `## Language` section of your staging doc (1–2 sentences each, synonyms under `_Avoid_`). **You can only write your own staging doc** — writing the public `CONTEXT.md` directly is blocked by a guard (exit 40).
 
 ```bash
-inlay context read       # 读「公共 CONTEXT.md + 你自己的暂存」（不会读到别人的暂存）
-inlay context list       # 列出公共文档 + 各用户暂存
+inlay context read       # read "public CONTEXT.md + your own staging" (never another user's staging)
+inlay context list       # list the public doc + each user's staging
 ```
 
-### 6. 提升术语到团队共识
+### 6. Promote terms to team consensus
 
-当你的术语达成共识，运行聚合 Skill（在 Agent 中调用 `/inlay-context-aggregate`）：它用 LLM 把你的暂存术语合并进公共 `context/CONTEXT.md`、标出与现有术语的冲突供你裁决，并在提升后**重置你的个人暂存**。
+When your terms are settled, run the aggregate skill (`/inlay-context-aggregate` in your agent): it uses the LLM to merge your staged terms into the public `context/CONTEXT.md`, surfaces conflicts with existing terms for you to decide, and **resets your personal staging** after promotion.
 
-### 7. 总览 & 体检
+### 7. Overview & health check
 
 ```bash
-inlay dashboard          # 生成只读 HTML 控制面板并在浏览器打开（不落库）
-inlay doctor             # 体检：VCS 探测 + 工作区一致性（游离/损坏）诊断
+inlay dashboard          # generate a read-only HTML dashboard and open it in the browser (not committed)
+inlay doctor             # health check: VCS detection + workspace consistency (orphan/broken) diagnostics
 ```
 
-完成。所有真相源（`_registry/*`、`_users/*`、`adr/*`、`context/CONTEXT.md`、`context/users/*`）提交版本控制；派生物（`_system/`、`*.index.*`）自动忽略。
+Done. All truth sources (`_registry/*`, `_users/*`, `adr/*`, `context/CONTEXT.md`, `context/users/*`) go into version control; derived files (`_system/`, `*.index.*`) are ignored automatically.
 
 ---
 
-## 命令速查
+## Command Reference
 
 ```
-inlay init                                初始化项目（骨架 + 忽略规则 + 注入 AGENTS.md/CLAUDE.md）
-inlay whoami                              解析当前用户（自动注册）
-inlay user register|list|reindex          用户注册表（一用户一文件）
-inlay ws create <id> --title <t>          创建工作区（一区一文件）
-inlay ws use <id> | resolve | list        切换 / 解析 / 列出工作区
-inlay ws remove <id> | reindex            删除 / 重建索引
-inlay adr new --title <t> [--status s]    新建 ADR（随机 id + front-matter）
+inlay init                                initialize project (skeleton + ignore rules + inject AGENTS.md/CLAUDE.md)
+inlay whoami                              resolve current user (auto-registers)
+inlay user register|list|reindex          user registry (one file per user)
+inlay ws create <id> --title <t>          create a workspace (one file per workspace)
+inlay ws use <id> | resolve | list        switch / resolve / list workspaces
+inlay ws remove <id> | reindex            remove / rebuild index
+inlay adr new --title <t> [--status s]    create an ADR (random id + front-matter)
         [--supersedes a,b] [--related a,b]
-inlay adr touch <id>                      记录修改者（modifiedBy）
-inlay adr list [--status s] | show <id>   查询 ADR
-inlay adr verify                          校验（失败 exit 20）
-inlay context add [--scope user|shared]   写自己暂存（--scope shared 被拦截 exit 40）
-inlay context list | read | reset         列出 / 读取(公共+本人) / 重置个人暂存
-inlay doctor                              环境与一致性诊断
-inlay dashboard [--no-open] [--out <dir>] 只读控制面板（临时 HTML）
+inlay adr touch <id>                      record a modifier (modifiedBy)
+inlay adr list [--status s] | show <id>   query ADRs
+inlay adr verify                          verify (exit 20 on failure)
+inlay context add [--scope user|shared]   write your own staging (--scope shared is blocked, exit 40)
+inlay context list | read | reset         list / read (public + own) / reset your staging
+inlay doctor                              environment & consistency diagnostics
+inlay dashboard [--no-open] [--out <dir>] read-only dashboard (temporary HTML)
 
-全局：--json   机器可读输出（含 data / status / ts / sessionId）
+global: --json   machine-readable output (with data / status / ts / sessionId)
 ```
 
-### 退出码
+### Exit codes
 
-| 码 | 含义 |
+| Code | Meaning |
 |---|---|
-| 0 | 成功 |
-| 10 | 当前工作区未确定（先 `ws use`/`resolve`） |
-| 11 | 工作区不存在 / 注册文件缺失或非法 |
-| 12 | 项目未初始化（先 `inlay init`） |
-| 20 | ADR 校验失败（id 冲突 / 引用断链 / 标题失配） |
-| 30 | VCS 适配层错误 |
-| 40 | 守卫拦截：试图直写公共 Context 或派生文件 |
+| 0 | Success |
+| 10 | No current workspace (run `ws use`/`resolve` first) |
+| 11 | Workspace missing / registration absent or invalid |
+| 12 | Project not initialized (run `inlay init`) |
+| 20 | ADR verification failed (id collision / broken reference / title mismatch) |
+| 30 | VCS adapter error |
+| 40 | Guard blocked: attempted direct write to public Context or a derived file |
 
-### 环境变量
+### Environment variables
 
-| 变量 | 作用 |
+| Variable | Purpose |
 |---|---|
-| `INLAY_USER` | 覆盖当前用户名（默认取计算机用户名）。身份经此封装层解析，便于测试/模拟多用户。 |
-| `INLAY_SESSION` | 会话标识，隔离「当前工作区」状态（默认 `pid-<pid>`）。 |
-| `INLAY_ROOT` | 项目根目录（默认当前工作目录）。 |
+| `INLAY_USER` | Override the current username (defaults to the OS username). Identity is resolved through this wrapper, which is handy for testing / simulating multiple users. |
+| `INLAY_SESSION` | Session identifier that isolates the "current workspace" state (defaults to `pid-<pid>`). |
+| `INLAY_ROOT` | Project root directory (defaults to the current working directory). |
 
 ---
 
-## 目录结构
+## Directory layout
 
 ```
 <project-root>/
-├── AGENTS.md / CLAUDE.md            # 注入的 Inlay 指引块（启动协议 + 铁律 + 读写规则）
-├── .inlay/                          # Inlay 配置与忽略规则片段
+├── AGENTS.md / CLAUDE.md            # injected Inlay guidance block (startup protocol + rules)
+├── .inlay/                          # Inlay config and ignore-rule fragments
 └── Workspaces/
-    ├── _registry/<id>.json          # 【真相源】一区一文件
-    ├── _users/<user>.json           # 【真相源】一用户一文件
-    ├── _system/                     # 【派生·不进版本控制】索引 + 会话私有当前态
+    ├── _registry/<id>.json          # [truth source] one file per workspace
+    ├── _users/<user>.json           # [truth source] one file per user
+    ├── _system/                     # [derived · not committed] indexes + session-private current state
     └── <workspace>/
-        ├── adr/ADR-<date>-<id>-<slug>.md      # 【真相源】一 ADR 一文件
+        ├── adr/ADR-<date>-<id>-<slug>.md      # [truth source] one file per ADR
         └── context/
-            ├── CONTEXT.md                      # 【真相源】公共术语表（团队共识）
-            └── users/<user>/CONTEXT.md         # 【真相源】个人暂存（聚合后重置）
+            ├── CONTEXT.md                      # [truth source] public glossary (team consensus)
+            └── users/<user>/CONTEXT.md         # [truth source] personal staging (reset after promotion)
 ```
 
 ---
 
-## Skills（多人增强版工作流）
+## Skills (multi-user enhanced workflow)
 
-`skills/` 下提供 4 个 Skill，把 mattpocock 的思路接入 Inlay 管线（写入改道经 CLI、读取范围隔离）：
+`skills/` provides 4 skills that plug mattpocock's approach into the Inlay pipeline (side effects routed through the CLI, reads scoped per user):
 
-| Skill | 作用 |
+| Skill | Purpose |
 |---|---|
-| `inlay-grill-with-docs` | 拷问式对齐计划，沿途经 CLI 记录 ADR / 起草术语 |
-| `inlay-improve-codebase-architecture` | 架构深化评审（HTML 报告 + grilling），副作用经 CLI |
-| `inlay-context-aggregate` | LLM 合并个人暂存术语 → 公共文档，标出冲突、提升后重置 |
-| `inlay-migrate` | 把现有 mattpocock 工作流文档无缝迁移为 Inlay 版本，并输出迁移报告 |
+| `inlay-grill-with-docs` | Interrogate a plan into alignment, recording ADRs / drafting terms via the CLI along the way |
+| `inlay-improve-codebase-architecture` | Architecture deepening review (HTML report + grilling), side effects via the CLI |
+| `inlay-context-aggregate` | LLM-merge personal staged terms → public doc, surface conflicts, reset after promotion |
+| `inlay-migrate` | Migrate an existing mattpocock-style repo to Inlay layout, with an HTML migration report |
 
 ---
 
-## 工作流（如何配合 Skill 使用）
+## Workflow (how to use the skills)
 
-Inlay 的核心闭环是「**想清楚 → 经 CLI 落档 → 聚合共识 → 审查**」：你和 Agent 用 Skill 把决策与术语想清楚，Skill 的副作用全部经 `inlay` CLI 落成冲突无关的真相源，再按需聚合成团队共识、用面板审查。
+Inlay's core loop is **think → record via CLI → aggregate consensus → review**: you and the agent think decisions and terms through with a skill, the skill's side effects all land through the `inlay` CLI as conflict-free truth sources, and you aggregate them into team consensus and review with the dashboard.
 
 ```
-   想清楚（Skill 驱动）                 落档（经 CLI，零冲突）            共识 & 审查
+   Think (skill-driven)                Record (via CLI, conflict-free)   Consensus & review
  ┌──────────────────────────┐      ┌──────────────────────────┐    ┌────────────────┐
  │ /inlay-grill-with-docs    │      │ inlay adr new / touch     │    │ /inlay-context- │
- │ /inlay-improve-codebase-… │ ───▶ │ inlay context add（个人）  │──▶ │   aggregate     │
- │   （拷问 / 架构评审）       │      │ → adr/ · users/<you>/…    │    │  → 公共 CONTEXT  │
+ │ /inlay-improve-codebase-… │ ───▶ │ inlay context add (own)   │──▶ │   aggregate     │
+ │   (grilling / arch review)│      │ → adr/ · users/<you>/…    │    │  → public CONTEXT│
  └──────────────────────────┘      └──────────────────────────┘    │ inlay dashboard │
                                                                      └────────────────┘
 ```
 
-> 前提：已按上文 [安装 · Skills](#skills可选供-claude-code-等-agent-使用) 把 Skill 装进 Agent 技能目录；下面的 `/xxx` 均为在 Agent 对话中输入的斜杠命令。
+> Prerequisite: install the skills into your agent's skills directory per [Install · Skills](#skills-optional-for-agents-such-as-claude-code) above; the `/xxx` below are slash commands typed in your agent's chat.
 
-### 每次开工
+### Every time you start
 
-会话开始先确认工作区（启动协议）——`inlay init` 注入到 `AGENTS.md`/`CLAUDE.md` 的指引会提示 Agent 自动这么做：
+Begin each session by confirming the workspace (startup protocol) — the guidance `inlay init` injects into `AGENTS.md`/`CLAUDE.md` prompts the agent to do this automatically:
 
 ```bash
-inlay ws resolve         # 没有当前工作区会以 exit 10 提示你先 use
-inlay ws use <id>        # 选定本次会话的工作区
+inlay ws resolve         # with no current workspace this exits 10 and tells you to `use` one
+inlay ws use <id>        # pick the workspace for this session
 ```
 
-### 场景一：对齐一个计划 / 设计 → `/inlay-grill-with-docs`
+### Scenario 1: align on a plan / design → `/inlay-grill-with-docs`
 
-最常用。Agent 会就你的计划逐点拷问，直到达成共识；过程中：
+The most common one. The agent grills your plan point by point until you reach a shared understanding; along the way:
 
-- 出现值得固化的决策（难以反悔、有真实取舍）→ Agent 用 `inlay adr new --title "…"` 建 ADR 并写正文；
-- 术语被厘清 → Agent 用 `inlay context add` 写进**你自己的**暂存术语表（不会动公共文档）。
+- a decision worth fixing (hard to reverse, a real trade-off) → the agent creates an ADR with `inlay adr new --title "…"` and writes the body;
+- a term gets sharpened → the agent writes it into **your own** staging glossary with `inlay context add` (the public doc is untouched).
 
-你只需对话，归档由 Skill 经 CLI 完成，多人同时进行也不会撞车。
+You just talk; the skill records everything through the CLI, and multiple people doing this at once never collide.
 
-### 场景二：改善架构 → `/inlay-improve-codebase-architecture`
+### Scenario 2: improve architecture → `/inlay-improve-codebase-architecture`
 
-Agent 浏览代码、产出一份**只读 HTML 架构评审报告**（写临时目录，不落库），列出「深化机会」候选。你挑一个深入 grilling，过程中同样经 CLI 记录 ADR / 术语。建议每隔几天跑一次。
+The agent walks the code and produces a **read-only HTML architecture review** (written to a temp dir, not committed) listing "deepening opportunities." Pick one and grill into it; ADRs / terms are recorded through the CLI the same way. Run it every few days.
 
-### 场景三：把个人术语提升为团队共识 → `/inlay-context-aggregate`
+### Scenario 3: promote personal terms to team consensus → `/inlay-context-aggregate`
 
-当你暂存的术语成熟，运行它：Agent 只读「公共 `CONTEXT.md` + 你自己的暂存」，用 LLM 合并去重、对与公共已有定义冲突的术语**请你裁决**，提升进公共文档后**重置你的个人暂存**。这是公共术语表唯一的写入途径。
+When your staged terms are mature, run it: the agent reads only "public `CONTEXT.md` + your own staging," uses the LLM to merge and de-duplicate, **asks you to decide** on any term that conflicts with an existing public definition, and **resets your personal staging** after promotion. This is the only write path to the public glossary.
 
-### 场景四：从旧工作流迁移 → `/inlay-migrate`
+### Scenario 4: migrate from an old workflow → `/inlay-migrate`
 
-已有 mattpocock 风格的 `docs/adr/NNNN-*.md` + 单一 `CONTEXT.md`？运行它一键转换为 Inlay 布局（顺序 ADR → 一文件 id 命名；旧 `CONTEXT.md` → 公共术语表起点），并产出一份 **HTML 迁移报告**供你审阅后再落库。
+Already have mattpocock-style `docs/adr/NNNN-*.md` + a single `CONTEXT.md`? Run it to convert to the Inlay layout in one shot (sequential ADRs → one-file id naming; old `CONTEXT.md` → the public glossary starting point), with an **HTML migration report** for you to review before committing.
 
-### 随时
+### Anytime
 
 ```bash
-inlay adr list / show <id> / verify    # 查看 / 校验决策
-inlay dashboard                         # 打开只读面板总览工作区 / ADR / 术语 / 用户
+inlay adr list / show <id> / verify    # view / verify decisions
+inlay dashboard                         # open the read-only dashboard over workspaces / ADRs / terms / users
 ```
 
 ---
 
-## 协作 SOP
+## Collaboration SOP
 
-1. **开工前**：拉取最新 → `inlay ws reindex`（或直接用查询命令，会自动刷新索引）。
-2. **工作中**：归档全经 CLI；ADR 新建天然不冲突；术语只写自己的暂存。
-3. **提交前**：`inlay adr verify`，确认未误提交派生文件。
-4. **提交**：仅真相源（注册表 / 用户 / ADR / 公共与个人 Context）。
-5. **聚合提升**：显式运行 `inlay-context-aggregate`。
-6. **总览**：`inlay dashboard`。
+1. **Before work**: pull latest → `inlay ws reindex` (or just use a query command, which refreshes the index for you).
+2. **During work**: archive everything through the CLI; new ADRs never conflict; only write your own staging for terms.
+3. **Before commit**: `inlay adr verify`, and confirm no derived files were staged.
+4. **Commit**: truth sources only (registry / users / ADRs / public & personal Context).
+5. **Promote**: explicitly run `inlay-context-aggregate`.
+6. **Overview**: `inlay dashboard`.
 
 ---
 
-## 开发
+## Development
 
 ```bash
-node --test test/*.test.js          # 单元 + CLI 集成测试
-bash scripts/example-e2e.sh         # 端到端真实案例（哈希计算器，三用户）
-node scripts/build-report.mjs       # 生成实现/测试 HTML 报告
+node --test test/*.test.js          # unit + CLI integration tests
+bash scripts/example-e2e.sh         # end-to-end real scenario (hash calculator, three users)
+node scripts/build-report.mjs       # generate the implementation/test HTML report
 ```
 
-设计文档见 `openspec/changes/establish-inlay-collaboration/`（proposal / design / specs / tasks）。
+Design docs live in `openspec/changes/establish-inlay-collaboration/` (proposal / design / specs / tasks).
 
 ## License
 
