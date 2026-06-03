@@ -1,6 +1,10 @@
 # Inlay
 
-**Inlay** 是一套面向「人 + Agent」团队的协作流程管线，专注管理两类最有价值的工程产物：**ADR**（架构决策记录）与 **Context**（团队术语表 / 通用语言）。它把 [mattpocock 的 Skill 工作流](https://skills.sh/mattpocock/skills)（`grill-with-docs`、`improve-codebase-architecture`）从个人向升级为**多人异步并发、零冲突**的协作流程。
+[![npm version](https://img.shields.io/npm/v/@lim-young/inlay.svg)](https://www.npmjs.com/package/@lim-young/inlay)
+[![license](https://img.shields.io/npm/l/@lim-young/inlay.svg)](./LICENSE)
+[![node](https://img.shields.io/node/v/@lim-young/inlay.svg)](https://nodejs.org)
+
+**Inlay** 是一套面向「人 + Agent」团队的协作流程管线，专注管理两类最有价值的工程产物：**ADR**（架构决策记录）与 **Context**（团队术语表 / 通用语言），让多人异步并发地产出这些文档时**零合并冲突**。它源自 [mattpocock 的 Skill 工作流](https://github.com/mattpocock/skills)（`grill-with-docs`、`improve-codebase-architecture`），并将其从个人向扩展为团队协作流程。
 
 > spec（规格）交给 [OpenSpec](https://github.com/Fission-AI/OpenSpec)；Inlay **不碰 spec**，只管 ADR + Context。
 
@@ -21,13 +25,11 @@
 ## 安装
 
 ```bash
-# 在本仓库目录内
-npm install
-npm link            # 暴露全局 `inlay` 命令（可选）
-# 或直接调用：node bin/inlay.js <command>
+npm install -g @lim-young/inlay
+inlay --help
 ```
 
-要求 Node.js ≥ 20（推荐 24）。无运行时依赖。
+要求 Node.js ≥ 20，无运行时依赖。免安装试用：`npx @lim-young/inlay <command>`。
 
 ---
 
@@ -42,7 +44,7 @@ cd your-project
 inlay init
 ```
 
-`init` 会：创建 `Workspaces/` 骨架、写好忽略规则（排除派生物）、并把 **Inlay 指引块**幂等注入 `AGENTS.md` 与 `CLAUDE.md`（已有文件则只替换标记块、不动其余内容）。**本期不安装任何 git 钩子。**
+`init` 会：创建 `Workspaces/` 骨架、写好忽略规则（排除派生物），并把 **Inlay 指引块**幂等注入 `AGENTS.md` 与 `CLAUDE.md`（已有文件则只替换标记块、不动其余内容）。
 
 ### 2. 确认身份（自动注册）
 
@@ -159,7 +161,7 @@ inlay dashboard [--no-open] [--out <dir>] 只读控制面板（临时 HTML）
 ```
 <project-root>/
 ├── AGENTS.md / CLAUDE.md            # 注入的 Inlay 指引块（启动协议 + 铁律 + 读写规则）
-├── .inlay/                          # 忽略规则片段（及未来钩子）
+├── .inlay/                          # Inlay 配置与忽略规则片段
 └── Workspaces/
     ├── _registry/<id>.json          # 【真相源】一区一文件
     ├── _users/<user>.json           # 【真相源】一用户一文件
@@ -195,8 +197,6 @@ inlay dashboard [--no-open] [--out <dir>] 只读控制面板（临时 HTML）
 5. **聚合提升**：显式运行 `inlay-context-aggregate`。
 6. **总览**：`inlay dashboard`。
 
-> ⚠️ 本期**不做自动化 Hook**：最硬的防御层是 CLI 前置守卫；`modifiedBy` 与提交前 `verify` 依赖流程纪律（已知并接受的边界）。
-
 ---
 
 ## 开发
@@ -211,4 +211,4 @@ node scripts/build-report.mjs       # 生成实现/测试 HTML 报告
 
 ## License
 
-MIT
+[Apache-2.0](./LICENSE)

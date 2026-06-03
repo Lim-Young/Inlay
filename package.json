@@ -1,5 +1,5 @@
 {
-  "name": "@inlay/cli",
+  "name": "@lim-young/inlay",
   "version": "0.1.0",
   "description": "Inlay — multi-agent collaboration pipeline for ADR + Context (conflict-free, local-first)",
   "type": "module",
@@ -10,14 +10,40 @@
     ".": "./src/index.js"
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "prepublishOnly": "npm test"
   },
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
+  "author": "LimYoung <lim.young@foxmail.com>",
+  "homepage": "https://github.com/Lim-Young/Inlay#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lim-Young/Inlay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Lim-Young/Inlay/issues"
+  },
+  "keywords": [
+    "adr",
+    "architecture-decision-record",
+    "context",
+    "glossary",
+    "ddd",
+    "agent",
+    "ai",
+    "collaboration",
+    "cli",
+    "openspec"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "bin",
-    "src"
+    "src",
+    "skills"
   ]
 }
