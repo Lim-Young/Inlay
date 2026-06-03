@@ -24,6 +24,8 @@
 
 ## 安装
 
+### CLI
+
 ```bash
 npm install -g @lim-young/inlay
 inlay --help
@@ -31,9 +33,27 @@ inlay --help
 
 要求 Node.js ≥ 20，无运行时依赖。免安装试用：`npx @lim-young/inlay <command>`。
 
+### Skills（可选，供 Claude Code 等 Agent 使用）
+
+Inlay 随 npm 包一起分发 4 个增强版 Skill（见下文 **Skills** 一节）。把它们装进 Agent 的技能目录后，即可在对话中用 `/inlay-grill-with-docs`、`/inlay-context-aggregate` 等斜杠命令调用。
+
+```bash
+# 全局安装 CLI 后，skills 位于 npm 全局目录
+SKILLS_SRC="$(npm root -g)/@lim-young/inlay/skills"
+
+# Claude Code · 项目级（随项目共享，推荐）
+mkdir -p .claude/skills && cp -r "$SKILLS_SRC"/* .claude/skills/
+
+# Claude Code · 用户级（对所有项目生效）
+mkdir -p ~/.claude/skills && cp -r "$SKILLS_SRC"/* ~/.claude/skills/
+```
+
+> Windows PowerShell：`Copy-Item -Recurse "$(npm root -g)\@lim-young\inlay\skills\*" .claude\skills\`
+> 也可不装 CLI，直接从仓库拷贝 `skills/` 目录。
+
 ---
 
-## QuickStart（5 分钟跑通）
+## 使用示例
 
 下面以「三人协作编写一个哈希计算器」为例。三个用户：`alice`、`bob`，以及你本机（`inlay whoami` 自动取计算机用户名）。
 
@@ -185,6 +205,61 @@ inlay dashboard [--no-open] [--out <dir>] 只读控制面板（临时 HTML）
 | `inlay-improve-codebase-architecture` | 架构深化评审（HTML 报告 + grilling），副作用经 CLI |
 | `inlay-context-aggregate` | LLM 合并个人暂存术语 → 公共文档，标出冲突、提升后重置 |
 | `inlay-migrate` | 把现有 mattpocock 工作流文档无缝迁移为 Inlay 版本，并输出迁移报告 |
+
+---
+
+## 工作流（如何配合 Skill 使用）
+
+Inlay 的核心闭环是「**想清楚 → 经 CLI 落档 → 聚合共识 → 审查**」：你和 Agent 用 Skill 把决策与术语想清楚，Skill 的副作用全部经 `inlay` CLI 落成冲突无关的真相源，再按需聚合成团队共识、用面板审查。
+
+```
+   想清楚（Skill 驱动）                 落档（经 CLI，零冲突）            共识 & 审查
+ ┌──────────────────────────┐      ┌──────────────────────────┐    ┌────────────────┐
+ │ /inlay-grill-with-docs    │      │ inlay adr new / touch     │    │ /inlay-context- │
+ │ /inlay-improve-codebase-… │ ───▶ │ inlay context add（个人）  │──▶ │   aggregate     │
+ │   （拷问 / 架构评审）       │      │ → adr/ · users/<you>/…    │    │  → 公共 CONTEXT  │
+ └──────────────────────────┘      └──────────────────────────┘    │ inlay dashboard │
+                                                                     └────────────────┘
+```
+
+> 前提：已按上文 [安装 · Skills](#skills可选供-claude-code-等-agent-使用) 把 Skill 装进 Agent 技能目录；下面的 `/xxx` 均为在 Agent 对话中输入的斜杠命令。
+
+### 每次开工
+
+会话开始先确认工作区（启动协议）——`inlay init` 注入到 `AGENTS.md`/`CLAUDE.md` 的指引会提示 Agent 自动这么做：
+
+```bash
+inlay ws resolve         # 没有当前工作区会以 exit 10 提示你先 use
+inlay ws use <id>        # 选定本次会话的工作区
+```
+
+### 场景一：对齐一个计划 / 设计 → `/inlay-grill-with-docs`
+
+最常用。Agent 会就你的计划逐点拷问，直到达成共识；过程中：
+
+- 出现值得固化的决策（难以反悔、有真实取舍）→ Agent 用 `inlay adr new --title "…"` 建 ADR 并写正文；
+- 术语被厘清 → Agent 用 `inlay context add` 写进**你自己的**暂存术语表（不会动公共文档）。
+
+你只需对话，归档由 Skill 经 CLI 完成，多人同时进行也不会撞车。
+
+### 场景二：改善架构 → `/inlay-improve-codebase-architecture`
+
+Agent 浏览代码、产出一份**只读 HTML 架构评审报告**（写临时目录，不落库），列出「深化机会」候选。你挑一个深入 grilling，过程中同样经 CLI 记录 ADR / 术语。建议每隔几天跑一次。
+
+### 场景三：把个人术语提升为团队共识 → `/inlay-context-aggregate`
+
+当你暂存的术语成熟，运行它：Agent 只读「公共 `CONTEXT.md` + 你自己的暂存」，用 LLM 合并去重、对与公共已有定义冲突的术语**请你裁决**，提升进公共文档后**重置你的个人暂存**。这是公共术语表唯一的写入途径。
+
+### 场景四：从旧工作流迁移 → `/inlay-migrate`
+
+已有 mattpocock 风格的 `docs/adr/NNNN-*.md` + 单一 `CONTEXT.md`？运行它一键转换为 Inlay 布局（顺序 ADR → 一文件 id 命名；旧 `CONTEXT.md` → 公共术语表起点），并产出一份 **HTML 迁移报告**供你审阅后再落库。
+
+### 随时
+
+```bash
+inlay adr list / show <id> / verify    # 查看 / 校验决策
+inlay dashboard                         # 打开只读面板总览工作区 / ADR / 术语 / 用户
+```
 
 ---
 
