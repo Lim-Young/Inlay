@@ -1,0 +1,23 @@
+{
+  "name": "@inlay/cli",
+  "version": "0.1.0",
+  "description": "Inlay — multi-agent collaboration pipeline for ADR + Context (conflict-free, local-first)",
+  "type": "module",
+  "bin": {
+    "inlay": "bin/inlay.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "files": [
+    "bin",
+    "src"
+  ]
+}
