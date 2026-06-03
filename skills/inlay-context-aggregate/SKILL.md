@@ -1,6 +1,6 @@
 ---
 name: inlay-context-aggregate
-description: Aggregate & promote your Inlay Context terms. LLM-merges the current user's staging glossary into the public CONTEXT.md, surfaces term conflicts for human decision, and resets your staging doc after promotion. Use when you want to promote your drafted terminology into the team's shared glossary.
+description: Aggregates and promotes Inlay Context terms — LLM-merges the current user's staging glossary into the public CONTEXT.md, surfaces conflicts with existing terms for human decision, and resets the staging doc after promotion (reads only public + own staging, never another user's). Use when promoting drafted terminology into the team's shared glossary or reconciling glossary conflicts in an Inlay-managed repo. Triggers: "aggregate context", "promote my terms", "merge glossary".
 ---
 
 # Inlay — Context Aggregate (promote + reset)

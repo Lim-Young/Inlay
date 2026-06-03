@@ -1,6 +1,6 @@
 ---
 name: inlay-migrate
-description: Migrate an existing mattpocock-style workflow repo (sequential docs/adr/NNNN-*.md + a single CONTEXT.md) into Inlay format. Converts ADRs to one-file id-named records and seeds the public Context doc, then emits an HTML migration report for review. Use for a seamless upgrade from the personal workflow to the Inlay multi-user workflow.
+description: Migrates an existing mattpocock-style workflow repo (sequential docs/adr/NNNN-*.md + a single CONTEXT.md) into Inlay layout — converts ADRs to one-file id-named records, seeds the public Context doc, and emits an HTML migration report for review. Use when migrating or upgrading an existing repo to the Inlay multi-user workflow. Triggers: "migrate to Inlay", "convert ADRs", "upgrade workflow", "import existing CONTEXT.md".
 ---
 
 # Inlay — Migrate (upgrade existing workflow → Inlay)
