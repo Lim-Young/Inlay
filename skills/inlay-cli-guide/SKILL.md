@@ -22,9 +22,33 @@ Inlay manages **ADRs** and **Context** (the team glossary) as conflict-free, one
 3. **Route through the CLI.** Use `inlay adr new` / `inlay context add`; do not `Write` to `adr/*.md` or `context/CONTEXT.md` directly.
 4. **React to exit codes** (see table) instead of guessing.
 
+## Agent session binding (MANDATORY for AI Agents)
+
+AI Agent 的 bash/shell 工具每次调用在**新进程**中执行（PID 不同），Inlay 默认的 `pid-<pid>` 会话标识无法跨调用持久。Agent **MUST** 在每次 inlay 命令前设置 `INLAY_SESSION` 为自己的**对话 Session ID**。
+
+**获取方法**：使用 `session_list` 工具查询当前对话的 Session ID（格式如 `ses_16df33a0affe...`）。该 ID 在同一对话的整个生命周期内保持不变，即使用户关闭终端后 Resume 也能恢复。
+
+**设置方法**（每次 inlay 调用前附加）：
+
+```powershell
+# PowerShell
+$env:INLAY_SESSION='<your-session-id>'; inlay ws resolve
+```
+
+```bash
+# Bash
+INLAY_SESSION='<your-session-id>' inlay ws resolve
+```
+
+**为什么不能用 OPENCODE_RUN_ID 或其他进程级标识**：这些是 per-process 的，用户关闭终端重新 Resume 对话时会变化。对话 Session ID 是 per-conversation 的，存储在 Agent 工具的持久化数据库中，跨重启稳定。
+
+**多 Agent 并行场景**：每个 Agent 对话有唯一的 Session ID，因此多个 Agent 同时操作不同 workspace 时天然隔离，互不干扰。
+
 ## Startup protocol (do this once per session)
 
 ```bash
+# 1. Set INLAY_SESSION (Agent only — see "Agent session binding" above)
+# 2. Check/set workspace:
 inlay ws resolve            # exit 0 → you have a workspace; exit 10 → none set
 # on exit 10:
 inlay ws use <id>           # pick one (ask the user which if ambiguous; `inlay ws list` to enumerate)
@@ -84,7 +108,7 @@ inlay dashboard [--no-open] [--out <dir>]   # read-only HTML overview
 ## Identity / session overrides (env)
 
 - `INLAY_USER` — act as a specific user (default: OS username).
-- `INLAY_SESSION` — isolate the "current workspace" state (default: `pid-<pid>`).
+- `INLAY_SESSION` — isolate the "current workspace" state (default: `pid-<pid>`). **AI Agents MUST set this to their conversation Session ID** — see "Agent session binding" section above.
 - `INLAY_ROOT` — project root (default: cwd).
 
 > Specs are **not** Inlay's job — they belong to OpenSpec. Inlay owns ADR + Context only.
