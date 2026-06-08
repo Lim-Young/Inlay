@@ -130,6 +130,10 @@ inlay dashboard          # generate a read-only HTML dashboard and open it in th
 inlay doctor             # health check: VCS detection + workspace consistency (orphan/broken) diagnostics
 ```
 
+The dashboard is a single self-contained HTML with three panels — **Overview / ADR / Context** — and a global **self / overview** lens. The ADR panel folds superseded ADRs under the decision that replaced them; the Context panel renders the public glossary plus staging.
+
+> **Privacy note (read before sharing):** the generated file inlines the **entire** team dataset (including every user's Context staging). The "self" lens is a **default filter, not an access boundary** — anyone with the file can read everything. It's built for **local, per-user generation**; don't redistribute the file. Each person runs `inlay dashboard` on their own checkout.
+
 Done. All truth sources (`_registry/*`, `_users/*`, `adr/*`, `context/CONTEXT.md`, `context/users/*`) go into version control; derived files (`_system/`, `*.index.*`) are ignored automatically.
 
 ---

@@ -6,7 +6,7 @@ import { initProject } from '../src/init.js';
 import { createWorkspace, useWorkspace } from '../src/workspace.js';
 import { newAdr, touchAdr, listAdr } from '../src/adr.js';
 import { addContext } from '../src/context.js';
-import { scanProject, renderHtml, generateDashboard } from '../src/dashboard.js';
+import { scanProject, renderHtml, generateDashboard, annotateSupersession, mdToHtml } from '../src/dashboard.js';
 
 const SID = 'sid';
 function setup() {
@@ -90,6 +90,60 @@ test('scanProject reports context divergence: per-user term counts + publicTerms
   }
 });
 
+test('mdToHtml renders a safe markdown subset and escapes HTML injection', () => {
+  assert.match(mdToHtml('# Title'), /<h[1-6][^>]*>Title<\/h[1-6]>/);
+  assert.match(mdToHtml('**bold**'), /<strong>bold<\/strong>/);
+  assert.match(mdToHtml('use `code` here'), /<code>code<\/code>/);
+  const list = mdToHtml('- one\n- two');
+  assert.match(list, /<ul>/);
+  assert.match(list, /<li>one<\/li>/);
+  // injection is escaped, never emitted raw
+  const evil = mdToHtml('hi <script>alert(1)</script>');
+  assert.ok(!/<script>/.test(evil), 'no raw script tag');
+  assert.match(evil, /&lt;script&gt;/);
+});
+
+test('annotateSupersession marks superseded ADRs inactive and records who superseded them', () => {
+  const adrs = annotateSupersession([
+    { id: 'A', supersedes: ['B'], related: [] },
+    { id: 'B', supersedes: [], related: [] },
+  ]);
+  const a = adrs.find((x) => x.id === 'A');
+  const b = adrs.find((x) => x.id === 'B');
+  assert.equal(a.active, true);
+  assert.deepEqual(a.supersededBy, []);
+  assert.equal(b.active, false);
+  assert.deepEqual(b.supersededBy, ['A']);
+});
+
+test('annotateSupersession accepts object refs ({id}) and ignores out-of-scope ids', () => {
+  const adrs = annotateSupersession([{ id: 'A', supersedes: [{ id: 'B' }, 'ZZZ'], related: [] }, { id: 'B' }]);
+  assert.equal(adrs.find((x) => x.id === 'B').active, false);
+});
+
+test('scanProject keeps each user staging content for the Context panel', () => {
+  const root = setup();
+  try {
+    const ws = scanProject({ root, currentUser: 'A1' }).workspaces.find((w) => w.id === 'hashcalc');
+    const a1 = ws.contextUsers.find((c) => c.user === 'A1');
+    assert.equal(typeof a1.content, 'string');
+    assert.match(a1.content, /Language/);
+  } finally {
+    rm(root);
+  }
+});
+
+test('scanProject keeps each ADR body for the reading panel', () => {
+  const root = setup();
+  try {
+    const ws = scanProject({ root, currentUser: 'A1' }).workspaces.find((w) => w.id === 'hashcalc');
+    assert.equal(typeof ws.adrs[0].body, 'string');
+    assert.match(ws.adrs[0].body, /TODO/);
+  } finally {
+    rm(root);
+  }
+});
+
 test('scanProject builds an activity stream from created + modifiedBy events', () => {
   const root = setup();
   try {
@@ -126,14 +180,63 @@ test('renderHtml inlines the full model as parseable JSON', () => {
   }
 });
 
-test('renderHtml defaults to the self lens and declares it is not a security boundary', () => {
+test('renderHtml defaults to the self lens with an overview control', () => {
   const root = setup();
   try {
     const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
     assert.match(html, /data-default-lens="self"/);
-    assert.match(html, /overview/, 'has an overview lens control');
-    // honest disclosure that the self lens is a default filter, not access control
-    assert.match(html, /默认筛选|不是安全|非安全/);
+    assert.match(html, /data-lens-btn="overview"/, 'has an overview lens control');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml has no security-disclaimer banner (productized)', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(!/不是安全|默认筛选|文件不外发|全部团队数据内联/.test(html), 'no disclaimer banner');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml provides Overview / ADR / Context panel navigation', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.match(html, /data-nav="overview"/);
+    assert.match(html, /data-nav="adr"/);
+    assert.match(html, /data-nav="context"/);
+    assert.match(html, /data-panel="adr"/);
+    assert.match(html, /data-panel="context"/);
+  } finally {
+    rm(root);
+  }
+});
+
+test('ADR panel folds superseded ADRs under their superseder', () => {
+  const root = setup();
+  try {
+    const b = listAdr({ root, sid: SID })[0].id; // existing "Use Node crypto"
+    newAdr({ root, sid: SID, title: 'Use streaming hash', supersedes: [b], env: { INLAY_USER: 'A1' } });
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    // superseded B is nested in a collapse, not a top-level card
+    assert.match(html, /<details/, 'uses native collapse');
+    assert.match(html, new RegExp('data-superseded="' + b + '"'), 'B nested as superseded');
+    assert.ok(!new RegExp('data-adr-top="' + b + '"').test(html), 'B is not a top-level card');
+  } finally {
+    rm(root);
+  }
+});
+
+test('Context panel shows public + own staging, marks others overview-only', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.match(html, /data-context-public/, 'renders public glossary');
+    assert.match(html, /class="staging mine" data-staging-user="A1"/);
+    assert.match(html, /class="staging overview-only" data-staging-user="B2"/);
   } finally {
     rm(root);
   }
