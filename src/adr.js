@@ -80,6 +80,12 @@ export function showAdr({ root, sid, id }) {
 // Validate id uniqueness, reference validity, and redundant-title consistency.
 export function verifyAdr({ root, sid }) {
   const { dir } = adrDirFor({ root, sid });
+  return verifyAdrDir(dir);
+}
+
+// Same checks as verifyAdr, but against an explicit ADR directory (no session).
+// Lets read-only scanners (dashboard) verify every workspace. design.md D4.
+export function verifyAdrDir(dir) {
   const all = readAll(dir);
   const problems = [];
   const byId = new Map();

@@ -120,9 +120,15 @@ async function main() {
     case 'doctor':
       return emit(doctor({ root }));
     case 'dashboard': {
-      const r = generateDashboard({ root, outDir: flags.out || undefined });
+      const currentUser = whoami({ root, env }).username;
+      const r = generateDashboard({
+        root,
+        outDir: flags.out || undefined,
+        currentUser,
+        view: flags.view === 'overview' ? 'overview' : 'self',
+      });
       if (!flags['no-open']) openInBrowser(r.path);
-      return emit({ path: r.path, workspaces: r.model.workspaces.length, users: r.model.users.length });
+      return emit({ path: r.path, currentUser, workspaces: r.model.workspaces.length, users: r.model.users.length });
     }
     default:
       process.stdout.write(usage() + '\n');
@@ -145,7 +151,7 @@ function usage() {
   adr new --title <t> [--status s] [--supersedes a,b] [--related a,b] | touch <id> | list [--status s] | show <id> | verify
   context add [--scope user|shared] | list | reset | read
   doctor
-  dashboard [--no-open] [--out <dir>]
+  dashboard [--no-open] [--out <dir>] [--view self|overview]
 
   global: --json   machine-readable output (data/status/ts/sessionId)`;
 }
