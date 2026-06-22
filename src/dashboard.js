@@ -797,7 +797,7 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   .adr-ref-chip.is-stale:hover{border-color:var(--in-color-warn);box-shadow:0 2px 12px rgba(245,158,11,.18)}
   .adr-ref-row{display:flex;flex-wrap:wrap;align-items:center;gap:2px;margin-top:var(--in-space-sm)}
   /* prose / markdown reading content */
-  .prose{font-size:var(--in-size-md);line-height:1.75;max-width:68ch;color:var(--in-color-fg)} .prose h3,.prose h4,.prose h5{text-transform:none;letter-spacing:0;color:var(--in-color-fg-dim);margin:24px 0 8px;font-weight:700;font-size:var(--in-size-lg)} .prose p{margin:10px 0} .prose code{font-size:var(--in-size-sm)} .prose strong{color:var(--in-color-fg);font-weight:700} .prose ul,.prose ol{margin:10px 0;padding-left:22px} .prose li{margin:4px 0}
+  .prose{font-size:var(--in-size-md);line-height:1.75;color:var(--in-color-fg)} .prose h3,.prose h4,.prose h5{text-transform:none;letter-spacing:0;color:var(--in-color-fg-dim);margin:24px 0 8px;font-weight:700;font-size:var(--in-size-lg)} .prose p{margin:10px 0} .prose code{font-size:var(--in-size-sm)} .prose strong{color:var(--in-color-fg);font-weight:700} .prose ul,.prose ol{margin:10px 0;padding-left:22px} .prose li{margin:4px 0}
   /* context panel */
   .glossary,.staging{background:var(--in-color-card);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:20px 24px;margin:16px 0;transition:border-color .2s var(--in-ease-out)}
   .glossary:hover,.staging:hover{border-color:var(--in-color-line-strong)}

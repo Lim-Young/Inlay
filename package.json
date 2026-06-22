@@ -1,6 +1,6 @@
 {
   "name": "@lim-young/inlay",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Inlay — multi-agent collaboration pipeline for ADR + Context (conflict-free, local-first)",
   "type": "module",
   "bin": {
