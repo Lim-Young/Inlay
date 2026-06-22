@@ -40,7 +40,8 @@ export function scanProject({ root, currentUser = null }) {
     const publicContext = exists(p.contextPublic(w.id)) ? fs.readFileSync(p.contextPublic(w.id), 'utf8') : '';
     const publicTerms = countTerms(publicContext);
     const supersessionChains = buildSupersessionChains(adrs);
-    return { ...w, adrs, contextUsers, publicContext, publicTerms, supersessionChains };
+    const staleRefs = findStaleRefs(adrs);
+    return { ...w, adrs, contextUsers, publicContext, publicTerms, supersessionChains, staleRefs };
   });
   const activity = buildActivity(workspaces);
   const health = buildHealth(workspaces, root);
@@ -48,6 +49,24 @@ export function scanProject({ root, currentUser = null }) {
   const activitySparkline = buildActivitySparkline(activity, 30);
   const healthSummary = buildHealthSummary(health);
   return { generatedAt: nowIso(), root, currentUser, users, workspaces, activity, health, contributions, activitySparkline, healthSummary };
+}
+
+// Detect stale references: ADRs whose `related` field points to a superseded ADR.
+// Returns { adrId -> [staleRefId, ...] }. design D8.
+export function findStaleRefs(adrs) {
+  const byId = new Map(adrs.map((a) => [a.id, a]));
+  const map = {};
+  for (const a of adrs) {
+    const stale = [];
+    for (const ref of a.related || []) {
+      const refId = typeof ref === 'string' ? ref : ref && ref.id;
+      if (!refId) continue;
+      const target = byId.get(refId);
+      if (target && target.status === 'superseded') stale.push(refId);
+    }
+    if (stale.length) map[a.id] = stale;
+  }
+  return map;
 }
 
 // Health = per-workspace registration status + ADR verify problems. design.md D4.
@@ -308,12 +327,16 @@ export function renderDonut(ok, orphan, broken) {
 
 // Render compact ADR list items from supersession chains. Each chain is one
 // list item; chains with versionCount > 1 show a history badge. design D6.
-export function renderAdrListItems(chains, workspaceId) {
+export function renderAdrListItems(chains, workspaceId, staleRefs) {
   if (!chains || !chains.length) return '';
   return chains
     .map((c) => {
       const a = c.latest;
       const wsAttr = workspaceId ? `data-workspace="${esc(workspaceId)}"` : '';
+      const isStaleAdr = staleRefs && staleRefs[a.id];
+      const staleBadge = isStaleAdr
+        ? `<span class="stale-badge" title="此 ADR 的 related 引用包含已 superseded 的 ADR (${isStaleAdr.join(', ')})，需要审阅">⚠ 陈旧引用</span>`
+        : '';
       const chainBadge =
         c.versionCount > 1
           ? `<span class="chain-badge chain-toggle" role="button" tabindex="0" aria-expanded="false" data-chain-id="${esc(a.id)}"><svg class="svg-icon sm chevron"><use href="#icon-chevron-down"/></svg>${c.versionCount} versions</span>`
@@ -332,10 +355,10 @@ export function renderAdrListItems(chains, workspaceId) {
               })
               .join('')
           : '';
-      return `<div class="adr-list-item" data-adr-id="${esc(a.id)}" ${wsAttr} tabindex="0" role="link" aria-label="ADR: ${esc(a.title)}">
+      return `<div class="adr-list-item" data-adr-id="${esc(a.id)}" data-status="${esc(a.status)}" ${wsAttr} tabindex="0" role="link" aria-label="ADR: ${esc(a.title)}">
         <div style="display:flex;align-items:center;gap:8px;justify-content:space-between">
           <strong style="font-size:var(--in-size-base);font-family:var(--in-font-sans)">${esc(a.title)}</strong>
-          <span class="status ${a.status === 'accepted' ? 'ok' : a.status === 'rejected' ? 'broken' : a.status === 'superseded' ? 'orphan' : ''}">${esc(a.status)}</span>
+          <span class="status ${a.status === 'accepted' ? 'ok' : a.status === 'rejected' ? 'broken' : a.status === 'superseded' ? 'orphan' : ''}">${esc(a.status)}</span>${staleBadge}
         </div>
         <div class="meta" style="margin-top:4px">${esc(a.createdBy || '—')} · ${esc((a.createdAt || '').slice(0, 10))}${chainBadge}</div>
         ${historyItems ? `<div class="chain-history" style="display:none;margin-top:8px;border-left:2px solid var(--in-color-line);padding-left:12px">${historyItems}</div>` : ''}
@@ -403,6 +426,19 @@ function renderGraph(w) {
     </div>`;
 }
 
+// Render a single ADR reference chip — rich bubble with title + status. design D7.
+function renderRefChip(id, byId, workspaceId) {
+  const ref = byId.get(id);
+  if (!ref) return `<code>${esc(id)}</code>`;
+  const st = ref.status === 'accepted' ? 'ok' : ref.status === 'rejected' ? 'broken' : ref.status === 'superseded' ? 'orphan' : '';
+  const wsAttr = workspaceId ? `data-workspace="${esc(workspaceId)}"` : '';
+  return `<span class="adr-ref-chip${ref.status==='superseded'?' is-stale':''}" data-ref-id="${esc(id)}" ${wsAttr} tabindex="0" role="link" title="${esc(ref.title)} · ${esc(ref.status)} · ${esc(ref.createdBy || '—')}">
+    <code class="chip-id">${esc(id)}</code>
+    <span class="chip-title">${esc(ref.title)}</span>
+    <span class="chip-status ${st}">${esc(ref.status)}</span>
+  </span>`;
+}
+
 // Recursive ADR card: a top-level (active) ADR, with the ADRs it supersedes
 // folded into a native <details> beneath it (default-collapsed). design D3.
 function renderAdrCard(a, byId, visited, isTop) {
@@ -413,7 +449,7 @@ function renderAdrCard(a, byId, visited, isTop) {
     .filter((id) => id && byId.has(id));
   const related = (a.related || []).map((r) => (typeof r === 'string' ? r : r && r.id)).filter(Boolean);
   const relHtml = related.length
-    ? `<div class="refs">related: ${related.map((id) => `<a href="#adr-${esc(id)}">${esc(id)}</a>`).join(', ')}</div>`
+    ? `<div class="refs">related: <span class="adr-ref-row">${related.map((id) => renderRefChip(id, byId)).join('')}</span></div>`
     : '';
   const folded = childIds.length
     ? `<details class="superseded-wrap"><summary>取代了 ${childIds.length} 条旧决策</summary>${childIds
@@ -473,6 +509,7 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   const hw = (model.health && model.health.workspaces) || [];
   const cnt = (s) => hw.filter((x) => x.status === s).length;
   const problems = hw.reduce((n, x) => n + (x.problems ? x.problems.length : 0), 0);
+  const staleCount = model.workspaces.reduce((n, w) => n + Object.keys(w.staleRefs || {}).length, 0);
   const hs = model.healthSummary || { ok: 0, orphan: 0, broken: 0, total: 0 };
   const healthBar = `<section class="card kpi"><h2>Health</h2><div style="display:flex;align-items:center;gap:16px">
     ${renderDonut(hs.ok, hs.orphan, hs.broken)}
@@ -480,7 +517,8 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
     <span class="status ok">${cnt('ok')} ok</span>
     <span class="status orphan">${cnt('orphan')} orphan</span>
     <span class="status broken">${cnt('broken')} broken</span>
-    · verify problems: <b>${problems}</b></p>
+    · verify problems: <b>${problems}</b>
+    ${staleCount ? ` · <span style="color:var(--in-color-warn)">⚠ 陈旧引用: <b>${staleCount}</b></span>` : ''}</p>
     ${problems ? `<ul>${hw.flatMap((x) => (x.problems || []).map((p) => `<li><code>${esc(x.id)}</code> ${esc(p)}</li>`)).join('')}</ul>` : ''}
     </div></div></section>`;
 
@@ -553,7 +591,7 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
     <div class="adr-list-view" data-adr-list>${
       model.workspaces
         .map((w) => {
-          const listItems = renderAdrListItems(w.supersessionChains, w.id);
+          const listItems = renderAdrListItems(w.supersessionChains, w.id, w.staleRefs);
           const chainCount = w.supersessionChains ? w.supersessionChains.length : 0;
           return `<section class="ws-block"><h2 class="ws-h">${esc(w.title || w.id)} <span class="mut">${chainCount} chain(s) · ${w.adrs.length} ADRs</span></h2>${
             listItems || '<p class="empty">no ADRs</p>'
@@ -623,7 +661,7 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
     --in-ease-out:cubic-bezier(.16,1,.3,1);--in-ease-in:cubic-bezier(.4,0,1,1);--in-ease-spring:cubic-bezier(.34,1.56,.64,1);
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--in-color-bg);color:var(--in-color-fg);font:var(--in-size-base)/1.6 var(--in-font-sans);-webkit-font-smoothing:antialiased}
+  body{margin:0;background:var(--in-color-bg);color:var(--in-color-fg);font:var(--in-size-md)/1.65 var(--in-font-sans);-webkit-font-smoothing:antialiased}
   /* focus ring */
   :focus-visible{outline:2px solid var(--in-color-accent);outline-offset:2px;border-radius:var(--in-radius-sm)}
   /* ---- appbar ---- */
@@ -683,6 +721,7 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   /* status badges */
   .status{font-size:10px;padding:3px 10px;border-radius:var(--in-radius-pill);margin-right:4px;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
   .status.ok{background:var(--in-color-ok-soft);color:var(--in-color-ok)} .status.orphan{background:var(--in-color-warn-soft);color:var(--in-color-warn)} .status.broken{background:var(--in-color-bad-soft);color:var(--in-color-bad)}
+  .stale-badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;padding:1px 7px;border-radius:var(--in-radius-pill);font-weight:600;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap;background:var(--in-color-warn-soft);color:var(--in-color-warn);border:1px solid rgba(245,158,11,.25)}
   .empty{color:var(--in-color-mut)} ul{margin:6px 0;padding-left:18px} li{margin:3px 0} .feed li{list-style:none;padding:5px 0} .feed{padding-left:0}
   /* SVG icon sprite */
   .svg-icon{width:18px;height:18px;display:inline-block;vertical-align:middle;flex-shrink:0} .svg-icon.sm{width:14px;height:14px} .svg-icon.lg{width:24px;height:24px}
@@ -698,7 +737,13 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   .graph-zoom-btn{background:var(--in-color-surface);border:1px solid var(--in-color-line);color:var(--in-color-fg);border-radius:var(--in-radius-sm);width:28px;height:28px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;line-height:1;padding:0;font-family:var(--in-font-mono);transition:all .15s var(--in-ease-out)}
   .graph-zoom-btn:hover{background:var(--in-color-accent-soft);border-color:var(--in-color-accent)}
   /* reading panels */
-  .reading{max-width:860px;margin:0 auto} .ws-block{margin-bottom:40px} .ws-h{font-size:var(--in-size-lg);font-weight:600;border-bottom:1px solid var(--in-color-line);padding-bottom:var(--in-space-sm);margin-bottom:var(--in-space-md);color:var(--in-color-fg-dim)}
+  .reading{max-width:760px;margin:0 auto} .ws-block{margin-bottom:40px} .ws-h{font-size:var(--in-size-lg);font-weight:600;border-bottom:1px solid var(--in-color-line);padding-bottom:var(--in-space-sm);margin-bottom:var(--in-space-md);color:var(--in-color-fg-dim)}
+  /* ADR detail view — centered reading layout */
+  .adr-detail-view .adr-detail-content{max-width:760px;margin:0 auto}
+  .adr-detail-view .adr-back-btn{margin-left:auto;margin-right:auto;display:block;max-width:760px}
+  .adr-detail-view .adr-breadcrumb{max-width:760px;margin-left:auto;margin-right:auto}
+  .adr-detail-view .adr-timeline{max-width:760px;margin-left:auto;margin-right:auto}
+  .adr-detail-view .adr-card{border:none;background:transparent;padding:0}
   /* ADR cards & list items */
   .adr-card{background:var(--in-color-card);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:16px 20px;margin:14px 0;transition:border-color .2s var(--in-ease-out)}
   .adr-card:hover{border-color:var(--in-color-line-strong)}
@@ -723,13 +768,38 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   .timeline-item{position:relative;padding:8px 0;padding-left:var(--in-space-md)}
   .timeline-item::before{content:"";position:absolute;left:-19px;top:14px;width:8px;height:8px;border-radius:50%;background:var(--in-color-mut)}
   .timeline-item.current::before{background:var(--in-color-ok);box-shadow:0 0 8px var(--in-color-ok-glow)}
+  /* superseded folded cards (replaces timeline in detail view) */
+  .superseded-fold{margin-top:var(--in-space-lg);border-top:1px solid var(--in-color-line);padding-top:var(--in-space-md)}
+  .superseded-fold>summary{cursor:pointer;color:var(--in-color-mut);font-size:var(--in-size-sm);font-weight:500;list-style:none;display:flex;align-items:center;gap:6px;transition:color .15s;padding:4px 0}
+  .superseded-fold>summary:hover{color:var(--in-color-fg)}
+  .superseded-fold[open]>summary{color:var(--in-color-fg);margin-bottom:var(--in-space-sm)}
+  .superseded-fold>summary .svg-icon{opacity:.6}
+  .superseded-cards{display:grid;gap:var(--in-space-sm)}
+  .superseded-card{background:var(--in-color-surface);border:1px solid var(--in-color-line);border-radius:var(--in-radius-md);padding:12px 16px;cursor:pointer;transition:all .2s var(--in-ease-out)}
+  .superseded-card:hover{border-color:var(--in-color-line-strong);background:rgba(255,255,255,.02);transform:translateX(2px)}
+  .superseded-card .superseded-card-title{font-size:var(--in-size-sm);font-weight:600;color:var(--in-color-fg);display:flex;align-items:center;gap:8px;justify-content:space-between}
+  .superseded-card .superseded-card-meta{font-size:var(--in-size-xs);color:var(--in-color-mut);margin-top:4px}
   /* refs / links */
   .refs{font-size:var(--in-size-xs);color:var(--in-color-mut);margin-top:var(--in-space-sm)} .refs a{color:var(--in-color-accent);text-decoration:none;transition:color .15s}
   .refs a:hover{text-decoration:underline}
-  /* prose / markdown */
-  .prose{font-size:var(--in-size-base);line-height:1.7;max-width:72ch} .prose h3,.prose h4,.prose h5{text-transform:none;letter-spacing:0;color:var(--in-color-fg);margin:10px 0 4px} .prose p{margin:8px 0} .prose code{font-size:var(--in-size-sm)}
+  /* ADR reference chip — rich bubble with title + status */
+  .adr-ref-chip{display:inline-flex;align-items:center;gap:8px;background:var(--in-color-elevated);border:1px solid var(--in-color-line);border-radius:var(--in-radius-md);padding:6px 12px;margin:3px 4px;cursor:pointer;transition:all .2s var(--in-ease-out);font-size:var(--in-size-sm);text-decoration:none;color:inherit;vertical-align:middle}
+  .adr-ref-chip:hover{border-color:var(--in-color-accent);background:var(--in-color-accent-soft);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.2)}
+  .adr-ref-chip:active{transform:translateY(0)}
+  .adr-ref-chip .chip-id{font-family:var(--in-font-mono);font-size:var(--in-size-xs);color:var(--in-color-accent);background:rgba(129,140,248,.10);padding:1px 6px;border-radius:var(--in-radius-sm);white-space:nowrap}
+  .adr-ref-chip .chip-title{font-weight:500;color:var(--in-color-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+  .adr-ref-chip .chip-status{font-size:10px;padding:1px 7px;border-radius:var(--in-radius-pill);font-weight:600;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+  .adr-ref-chip .chip-status.ok{background:var(--in-color-ok-soft);color:var(--in-color-ok)}
+  .adr-ref-chip .chip-status.orphan{background:var(--in-color-warn-soft);color:var(--in-color-warn)}
+  .adr-ref-chip .chip-status.broken{background:var(--in-color-bad-soft);color:var(--in-color-bad)}
+  /* stale reference chip - superseded ADR referenced via related field */
+  .adr-ref-chip.is-stale{border-color:var(--in-color-warn);background:var(--in-color-warn-soft);box-shadow:0 0 0 1px rgba(245,158,11,.12)}
+  .adr-ref-chip.is-stale:hover{border-color:var(--in-color-warn);box-shadow:0 2px 12px rgba(245,158,11,.18)}
+  .adr-ref-row{display:flex;flex-wrap:wrap;align-items:center;gap:2px;margin-top:var(--in-space-sm)}
+  /* prose / markdown reading content */
+  .prose{font-size:var(--in-size-md);line-height:1.75;max-width:68ch;color:var(--in-color-fg)} .prose h3,.prose h4,.prose h5{text-transform:none;letter-spacing:0;color:var(--in-color-fg-dim);margin:24px 0 8px;font-weight:700;font-size:var(--in-size-lg)} .prose p{margin:10px 0} .prose code{font-size:var(--in-size-sm)} .prose strong{color:var(--in-color-fg);font-weight:700} .prose ul,.prose ol{margin:10px 0;padding-left:22px} .prose li{margin:4px 0}
   /* context panel */
-  .glossary,.staging{background:var(--in-color-card);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:16px 20px;margin:14px 0;transition:border-color .2s var(--in-ease-out)}
+  .glossary,.staging{background:var(--in-color-card);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:20px 24px;margin:16px 0;transition:border-color .2s var(--in-ease-out)}
   .glossary:hover,.staging:hover{border-color:var(--in-color-line-strong)}
   .staging.mine{border-color:rgba(129,140,248,.30)}
   body.lens-self .overview-only{display:none}
@@ -787,7 +857,8 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   <span class="tools">
     <input id="q" type="search" placeholder="搜索 ADR…" aria-label="search">
     <select id="statusFilter" aria-label="filter by status">
-      <option value="">all status</option>
+      <option value="active">active (default)</option>
+      <option value="all">all</option>
       <option value="proposed">proposed</option>
       <option value="accepted">accepted</option>
       <option value="rejected">rejected</option>
@@ -861,12 +932,16 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
     if(lv) lv.style.display='none'; if(dv) dv.style.display='';
     if(bc) bc.innerHTML=ws+' <span style="color:var(--in-color-mut)">/</span> '+esc(adr.title);
     if(content){
-      var rels=(adr.supersedes||[]).concat(adr.related||[]).filter(Boolean).map(function(r){var id=typeof r==='string'?r:r&&r.id;return id?'<a href="#adr/'+esc(ws)+'/'+esc(id)+'">'+esc(id)+'</a>':'';}).join(', ');
-      content.innerHTML='<article class="adr-card"><h3 class="adr-title">'+esc(adr.title)+' <span class="pill">'+esc(adr.status)+'</span></h3><div class="meta">id <code>'+esc(adr.id)+'</code> · by '+esc(adr.createdBy)+' · '+esc((adr.createdAt||'').slice(0,10))+(adr.active?'':' · superseded')+'</div><div class="prose">'+(adr.body?mdToHtml(adr.body):'<p class="empty">no body</p>')+'</div>'+(rels?'<div class="refs">related: '+rels+'</div>':'')+'</article>';
+      // related → bubble chips; supersedes → folded cards below
+      var relatedIds=[];
+      (adr.related||[]).filter(Boolean).forEach(function(r){var id=typeof r==='string'?r:r&&r.id;if(id&&byId[id])relatedIds.push(id);});
+      var relChips=relatedIds.map(function(id){return renderRefChip(id,byId,ws);}).join('');
+      content.innerHTML='<article class="adr-card"><h3 class="adr-title">'+esc(adr.title)+' <span class="pill">'+esc(adr.status)+'</span></h3><div class="meta">id <code>'+esc(adr.id)+'</code> · by '+esc(adr.createdBy)+' · '+esc((adr.createdAt||'').slice(0,10))+(adr.active?'':' · superseded')+'</div><div class="prose">'+(adr.body?mdToHtml(adr.body):'<p class="empty">no body</p>')+'</div>'+(relChips?'<div class="refs"><div class="adr-ref-row">'+relChips+'</div></div>':'')+'</article>';
     }
     if(timeline&&adrs.length>1){
       var chain=buildChain(adrs,adrId);
-      if(chain.length>1) timeline.innerHTML=renderTimeline(chain,adrId);
+      var older=chain.filter(function(a){return a.id!==adrId;});
+      if(older.length) timeline.innerHTML='<details class="superseded-fold"><summary><svg class="svg-icon sm"><use href="#icon-history"/></svg> 完整历史记录 ('+older.length+' 条)</summary><div class="superseded-cards">'+older.map(function(s){var st=s.status==='accepted'?'ok':s.status==='rejected'?'broken':s.status==='superseded'?'orphan':'';return '<div class="superseded-card" data-adr-id="'+esc(s.id)+'" data-workspace="'+esc(ws)+'" tabindex="0" role="link"><div class="superseded-card-title">'+esc(s.title)+' <span class="status '+st+'">'+esc(s.status)+'</span></div><div class="superseded-card-meta">'+esc(s.id)+' · '+esc(s.createdBy||'--')+' · '+esc((s.createdAt||'').slice(0,10))+'</div></div>';}).join('')+'</div></details>';
       else timeline.innerHTML='';
     }else if(timeline) timeline.innerHTML='';
     location.hash='#adr/'+ws+'/'+adrId;
@@ -890,6 +965,12 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   window.addEventListener('hashchange',applyHash);
   /* ---- helpers ---- */
   function esc(s){return String(s||'').replace(/[&<>"]/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];});}
+  function renderRefChip(refId,byId,ws){
+    var ref=byId[refId];
+    if(!ref) return '<code>'+esc(refId)+'</code>';
+    var st=ref.status==='accepted'?'ok':ref.status==='rejected'?'broken':ref.status==='superseded'?'orphan':'';
+    return '<span class="adr-ref-chip'+(ref.status==='superseded'?' is-stale':'')+'" data-ref-id="'+esc(refId)+'" data-workspace="'+esc(ws)+'" tabindex="0" role="link" title="'+esc(ref.title)+' · '+esc(ref.status)+' · '+esc(ref.createdBy||'—')+'"><code class="chip-id">'+esc(refId)+'</code><span class="chip-title">'+esc(ref.title)+'</span><span class="chip-status '+st+'">'+esc(ref.status)+'</span></span>';
+  }
   function mdToHtml(md){
     var lines=String(md||'').replace(/\\r\\n/g,'\\n').split('\\n'),out=[],inList=false,para=[];
     function inline(s){return esc(s).replace(/\\*\\*([^\\*]+)\\*\\*/g,'<strong>$1</strong>').replace(/\x60([^\x60]+)\x60/g,'<code>$1</code>');}
@@ -925,7 +1006,8 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
     // table rows in overview
     var rows=document.querySelectorAll('tr[data-row]');
     for(var i=0;i<rows.length;i++){var tr=rows[i];
-      var okText=tr.getAttribute('data-row').indexOf(q)>=0,okStatus=!st||tr.getAttribute('data-status')===st;
+      var trStatus2=tr.getAttribute('data-status');
+      var okText=tr.getAttribute('data-row').indexOf(q)>=0,okStatus=st==='all'?true:st&&st!=='active'?trStatus2===st:trStatus2!=='superseded';
       tr.style.display=(okText&&okStatus)?'':'none';}
     // build body-match set from inline model (fulll-text search over ADR body)
     var bodyMatch=new Set();
@@ -936,7 +1018,11 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
       var text=(it.textContent||'').toLowerCase();
       var adrId=it.getAttribute('data-adr-id');
       var matchesBody=adrId&&bodyMatch.has(adrId);
-      it.style.display=(!q||text.indexOf(q)>=0||matchesBody)?'':'none';}
+      var itemStatus=it.getAttribute('data-status')||'';
+      var matchesText=!q||text.indexOf(q)>=0||matchesBody;
+      // status filter: "all" → show all; "active"/unset → hide superseded; else exact match
+      var okStatus=st==='all'?true:st&&st!=='active'?itemStatus===st:itemStatus!=='superseded';
+      it.style.display=(matchesText&&okStatus)?'':'none';}
     // also show chain-history items if their parent list item is visible
     var histories=document.querySelectorAll('.chain-history');
     for(var k=0;k<histories.length;k++){var h=histories[k];var parent=h.closest('.adr-list-item');if(parent&&parent.style.display==='none')h.style.display='none';}
@@ -973,6 +1059,24 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
       }).catch(function(){});
     });
     code.parentElement.appendChild(btn);
+  });
+  /* ---- ADR reference chip + superseded card click delegation ---- */
+  document.querySelector('main').addEventListener('click',function(e){
+    var chip=e.target.closest('.adr-ref-chip');
+    if(chip){
+      e.stopPropagation();
+      var refId=chip.getAttribute('data-ref-id');
+      var ws=chip.getAttribute('data-workspace');
+      if(refId&&ws) showAdrDetail(ws,refId);
+      return;
+    }
+    var sc=e.target.closest('.superseded-card');
+    if(sc){
+      e.stopPropagation();
+      var refId=sc.getAttribute('data-adr-id');
+      var ws=sc.getAttribute('data-workspace');
+      if(refId&&ws) showAdrDetail(ws,refId);
+    }
   });
   /* ---- ADR list item click handlers ---- */
   document.querySelectorAll('.adr-list-item').forEach(function(el){

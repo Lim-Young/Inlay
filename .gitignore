@@ -1,0 +1,16 @@
+/.claude
+/Docs
+/openspec
+/*.md
+!/README*.md
+
+# npm
+node_modules/
+*.tgz
+/.playwright-mcp
+
+# example data & test artifacts
+/Example/
+/Workspaces/
+*.png
+*.yml

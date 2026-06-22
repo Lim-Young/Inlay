@@ -15,7 +15,7 @@ function adrDirFor({ root, sid }) {
   return { dir, ws };
 }
 
-function readAll(dir) {
+export function readAll(dir) {
   if (!exists(dir)) return [];
   return fs
     .readdirSync(dir)
