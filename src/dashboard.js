@@ -39,12 +39,15 @@ export function scanProject({ root, currentUser = null }) {
       : [];
     const publicContext = exists(p.contextPublic(w.id)) ? fs.readFileSync(p.contextPublic(w.id), 'utf8') : '';
     const publicTerms = countTerms(publicContext);
-    return { ...w, adrs, contextUsers, publicContext, publicTerms };
+    const supersessionChains = buildSupersessionChains(adrs);
+    return { ...w, adrs, contextUsers, publicContext, publicTerms, supersessionChains };
   });
   const activity = buildActivity(workspaces);
   const health = buildHealth(workspaces, root);
   const contributions = buildContributions(workspaces);
-  return { generatedAt: nowIso(), root, currentUser, users, workspaces, activity, health, contributions };
+  const activitySparkline = buildActivitySparkline(activity, 30);
+  const healthSummary = buildHealthSummary(health);
+  return { generatedAt: nowIso(), root, currentUser, users, workspaces, activity, health, contributions, activitySparkline, healthSummary };
 }
 
 // Health = per-workspace registration status + ADR verify problems. design.md D4.
@@ -113,6 +116,86 @@ export function annotateSupersession(adrs) {
   }));
 }
 
+// Group ADRs into supersession chains. Each chain is an ordered list from
+// newest (latest active ADR) to oldest (original). Single ADRs form chains
+// of one. Cycle-detection via visited set. Pure function. design D6.
+export function buildSupersessionChains(adrs) {
+  // resolve a supersedes ref to its string id
+  const resolveRef = (ref) => (typeof ref === 'string' ? ref : ref && ref.id);
+  // supersededBy: who supersedes each ADR (same logic as annotateSupersession)
+  const ids = new Set(adrs.map((a) => a.id));
+  const supersededBy = new Map(adrs.map((a) => [a.id, []]));
+  for (const a of adrs) {
+    for (const ref of a.supersedes || []) {
+      const target = resolveRef(ref);
+      if (target && ids.has(target)) supersededBy.get(target).push(a.id);
+    }
+  }
+  // roots = ADRs that nobody supersedes → chain heads
+  const roots = adrs.filter((a) => supersededBy.get(a.id).length === 0);
+  const byId = new Map(adrs.map((a) => [a.id, a]));
+  const visited = new Set();
+  const chains = [];
+  for (const root of roots) {
+    if (visited.has(root.id)) continue;
+    const versions = [];
+    // BFS down supersedes edges to collect chain from newest to oldest
+    const stack = [root];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (visited.has(cur.id)) continue;
+      visited.add(cur.id);
+      versions.push(cur);
+      // push superseded ADRs onto stack; order reversed so they appear
+      // after the superseder in the final list (newest-first)
+      const children = (cur.supersedes || [])
+        .map(resolveRef)
+        .filter((id) => id && byId.has(id) && !visited.has(id))
+        .reverse();
+      for (const cid of children) stack.push(byId.get(cid));
+    }
+    chains.push({ latest: root, versions, versionCount: versions.length });
+  }
+  // any ADRs not reached due to cycles → add as single-element chains
+  for (const a of adrs) {
+    if (!visited.has(a.id)) {
+      chains.push({ latest: a, versions: [a], versionCount: 1 });
+    }
+  }
+  return chains;
+}
+
+// Aggregate activity events into daily counts for a trailing window of `days`.
+// Returns [{date: 'YYYY-MM-DD', count: N}] in ascending order. Pure function.
+export function buildActivitySparkline(events, days = 30) {
+  const buckets = new Map();
+  const now = new Date();
+  // init all trailing days to zero
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    buckets.set(d.toISOString().slice(0, 10), 0);
+  }
+  for (const e of events) {
+    const key = String(e.at).slice(0, 10); // YYYY-MM-DD
+    if (buckets.has(key)) buckets.set(key, buckets.get(key) + 1);
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, count]) => ({ date, count }));
+}
+
+// Aggregate workspace health status counts. Pure function. design D7.
+export function buildHealthSummary(health) {
+  const hw = (health && health.workspaces) || [];
+  return {
+    ok: hw.filter((x) => x.status === 'ok').length,
+    orphan: hw.filter((x) => x.status === 'orphan').length,
+    broken: hw.filter((x) => x.status === 'broken').length,
+    total: hw.length,
+  };
+}
+
 // Minimal, dependency-free markdown → HTML for the reading panels.
 // Subset: # / ## / ### headings, `- `/`* ` lists, blank-line paragraphs,
 // **bold**, `code`. Escape-first so HTML in the source can never inject. design D4.
@@ -166,6 +249,101 @@ export function mdToHtml(md) {
   return out.join('\n');
 }
 
+// Inline SVG sparkline chart for activity trends. Pure function. design D4.
+export function renderSparkline(data) {
+  if (!data || !data.length) return '';
+  const W = 280, H = 48, pad = 4;
+  const max = Math.max(1, ...data.map((d) => d.count));
+  const stepX = data.length > 1 ? (W - 2 * pad) / (data.length - 1) : W / 2;
+  const points = data
+    .map((d, i) => {
+      const x = pad + i * stepX;
+      const y = H - pad - (d.count / max) * (H - 2 * pad);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+  const last = data[data.length - 1];
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Activity sparkline: ${last.count} event(s) on ${last.date}"><title>Activity sparkline — ${last.count} event(s) on ${last.date}</title><polyline points="${points}" fill="none" stroke="var(--in-color-ok)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+// Inline SVG horizontal bar chart for contributions. Sorted by created count desc. design D4.
+export function renderBarChart(contributions) {
+  if (!contributions || !contributions.length) return '';
+  const sorted = [...contributions].sort((a, b) => b.created - a.created);
+  const max = Math.max(1, ...sorted.map((c) => c.created + c.touched));
+  const barH = 18, gap = 6, labelW = 50, numW = 36, W = 360;
+  const H = sorted.length * (barH + gap) + 4;
+  const bars = sorted
+    .map((c, i) => {
+      const y = 4 + i * (barH + gap);
+      const createdW = ((c.created / max) * (W - labelW - numW - 8)).toFixed(0);
+      const touchedW = ((c.touched / max) * (W - labelW - numW - 8)).toFixed(0);
+      return `<g><text x="0" y="${y + 13}" fill="var(--in-color-fg)" font-size="12" font-family="var(--in-font-sans)">${esc(c.user)}</text><rect x="${labelW}" y="${y}" width="${createdW}" height="${barH}" rx="3" fill="var(--in-color-ok)" opacity=".85"><title>${c.created} created</title></rect><rect x="${labelW + Number(createdW)}" y="${y}" width="${touchedW}" height="${barH}" rx="3" fill="var(--in-color-accent)" opacity=".6"><title>${c.touched} touched</title></rect><text x="${W}" y="${y + 13}" fill="var(--in-color-mut)" font-size="11" font-family="var(--in-font-mono)" text-anchor="end">${c.created}+${c.touched}</text></g>`;
+    })
+    .join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Contribution chart"><title>Contribution chart — created (green) + touched (blue)</title>${bars}</svg>`;
+}
+
+// Inline SVG donut chart for health status. Pure function. design D4.
+export function renderDonut(ok, orphan, broken) {
+  const total = ok + orphan + broken || 1;
+  const r = 20, c = 28, circ = 2 * Math.PI * r;
+  const segments = [
+    { val: ok, color: 'var(--in-color-ok)' },
+    { val: orphan, color: 'var(--in-color-warn)' },
+    { val: broken, color: 'var(--in-color-bad)' },
+  ];
+  let offset = 0;
+  const rings = segments
+    .filter((s) => s.val > 0)
+    .map((s) => {
+      const len = (s.val / total) * circ;
+      const seg = `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${s.color}" stroke-width="6" stroke-dasharray="${len.toFixed(1)} ${(circ - len).toFixed(1)}" stroke-dashoffset="${(-offset).toFixed(1)}" transform="rotate(-90 ${c} ${c})"><title>${s.val}</title></circle>`;
+      offset += len;
+      return seg;
+    })
+    .join('');
+  return `<svg viewBox="0 0 ${c * 2} ${c * 2}" width="56" height="56" role="img" aria-label="Health: ${ok} ok, ${orphan} orphan, ${broken} broken"><title>Health — ${ok} ok, ${orphan} orphan, ${broken} broken</title>${rings}<text x="${c}" y="${c + 4}" text-anchor="middle" fill="var(--in-color-fg)" font-size="14" font-weight="700" font-family="var(--in-font-mono)">${ok + orphan + broken}</text></svg>`;
+}
+
+// Render compact ADR list items from supersession chains. Each chain is one
+// list item; chains with versionCount > 1 show a history badge. design D6.
+export function renderAdrListItems(chains, workspaceId) {
+  if (!chains || !chains.length) return '';
+  return chains
+    .map((c) => {
+      const a = c.latest;
+      const wsAttr = workspaceId ? `data-workspace="${esc(workspaceId)}"` : '';
+      const chainBadge =
+        c.versionCount > 1
+          ? `<span class="chain-badge chain-toggle" role="button" tabindex="0" aria-expanded="false" data-chain-id="${esc(a.id)}"><svg class="svg-icon sm chevron"><use href="#icon-chevron-down"/></svg>${c.versionCount} versions</span>`
+          : '';
+      const historyItems =
+        c.versionCount > 1
+          ? c.versions
+              .slice(1)
+              .map((v) => {
+                const vStatus = v.status === 'accepted' ? 'ok' : v.status === 'rejected' ? 'broken' : v.status === 'superseded' ? 'orphan' : '';
+                return `<div class="chain-history-item" data-adr-id="${esc(v.id)}" data-workspace="${esc(workspaceId || '')}" tabindex="0" role="link" aria-label="ADR: ${esc(v.title)}">
+                <span style="color:var(--in-color-mut);font-size:var(--in-size-xs);font-family:var(--in-font-mono)">${esc(v.id)}</span>
+                <span style="font-size:var(--in-size-sm);margin-left:8px">${esc(v.title)}</span>
+                <span class="status ${vStatus}">${esc(v.status)}</span>
+              </div>`;
+              })
+              .join('')
+          : '';
+      return `<div class="adr-list-item" data-adr-id="${esc(a.id)}" ${wsAttr} tabindex="0" role="link" aria-label="ADR: ${esc(a.title)}">
+        <div style="display:flex;align-items:center;gap:8px;justify-content:space-between">
+          <strong style="font-size:var(--in-size-base);font-family:var(--in-font-sans)">${esc(a.title)}</strong>
+          <span class="status ${a.status === 'accepted' ? 'ok' : a.status === 'rejected' ? 'broken' : a.status === 'superseded' ? 'orphan' : ''}">${esc(a.status)}</span>
+        </div>
+        <div class="meta" style="margin-top:4px">${esc(a.createdBy || '—')} · ${esc((a.createdAt || '').slice(0, 10))}${chainBadge}</div>
+        ${historyItems ? `<div class="chain-history" style="display:none;margin-top:8px;border-left:2px solid var(--in-color-line);padding-left:12px">${historyItems}</div>` : ''}
+      </div>`;
+    })
+    .join('');
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
@@ -182,31 +360,47 @@ function refIds(a) {
 }
 
 // Inline SVG relationship graph: nodes = ADRs, edges = supersedes/related.
-// Single-row layout, no third-party library (design D5).
+// Single-row layout, zoomable/pannable, clickable nodes. design D5.
 function renderGraph(w) {
   if (!w.adrs.length) return '';
   const ids = new Set(w.adrs.map((a) => a.id));
   const pos = new Map();
-  const stepX = 130;
+  const stepX = 130, nodeR = 16;
   const W = 40 + w.adrs.length * stepX;
-  const H = 90;
-  w.adrs.forEach((a, i) => pos.set(a.id, { x: 40 + i * stepX, y: 55 }));
+  const H = 100;
+  w.adrs.forEach((a, i) => pos.set(a.id, { x: 40 + i * stepX, y: 60 }));
   const edges = [];
   for (const a of w.adrs) {
     for (const t of refIds(a)) {
       if (!ids.has(t)) continue;
       const s = pos.get(a.id);
       const d = pos.get(t);
-      edges.push(`<line x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}" stroke="#4ea1ff" stroke-width="1.5" marker-end="url(#arrow)"/>`);
+      edges.push(`<line x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}" stroke="#4ea1ff" stroke-width="1.5" marker-end="url(#arrow-${esc(w.id)})"/>`);
     }
   }
   const nodes = w.adrs
     .map((a) => {
       const c = pos.get(a.id);
-      return `<g><circle cx="${c.x}" cy="${c.y}" r="14" fill="#1a2027" stroke="#2a3640"/><text x="${c.x}" y="${c.y - 20}" fill="#8b98a5" font-size="10" text-anchor="middle">${esc(a.id)}</text></g>`;
+      const statusClass = a.status === 'accepted' ? 'ok' : a.status === 'rejected' ? 'broken' : a.status === 'superseded' ? 'orphan' : '';
+      return `<g class="graph-node" data-adr-id="${esc(a.id)}" data-workspace="${esc(w.id)}">
+        <title>${esc(a.title)} · ${esc(a.status)}</title>
+        <circle cx="${c.x}" cy="${c.y}" r="${nodeR}" fill="#1a2027" stroke="#2a3640"/>
+        <text x="${c.x}" y="${c.y - nodeR - 6}" fill="#8b98a5" font-size="10" text-anchor="middle">${esc(a.id)}</text>
+      </g>`;
     })
     .join('');
-  return `<h3>Decision graph</h3><div class="graph"><svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="ADR relationship graph"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="20" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#4ea1ff"/></marker></defs>${edges.join('')}${nodes}</svg></div>`;
+  return `<h3>Decision graph</h3>
+    <div class="graph-wrap" style="width:100%;height:150px">
+      <div class="graph-controls">
+        <button class="graph-zoom-btn" title="Zoom in">+</button>
+        <button class="graph-zoom-btn" title="Zoom out">−</button>
+        <button class="graph-zoom-btn" title="Reset">↺</button>
+      </div>
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;transform-origin:0 0">
+        <defs><marker id="arrow-${esc(w.id)}" markerWidth="8" markerHeight="8" refX="20" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#4ea1ff"/></marker></defs>
+        ${edges.join('')}${nodes}
+      </svg>
+    </div>`;
 }
 
 // Recursive ADR card: a top-level (active) ADR, with the ADRs it supersedes
@@ -279,13 +473,16 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   const hw = (model.health && model.health.workspaces) || [];
   const cnt = (s) => hw.filter((x) => x.status === s).length;
   const problems = hw.reduce((n, x) => n + (x.problems ? x.problems.length : 0), 0);
-  const healthBar = `<section class="card"><h2>Health</h2><p>
+  const hs = model.healthSummary || { ok: 0, orphan: 0, broken: 0, total: 0 };
+  const healthBar = `<section class="card kpi"><h2>Health</h2><div style="display:flex;align-items:center;gap:16px">
+    ${renderDonut(hs.ok, hs.orphan, hs.broken)}
+    <div><p style="margin:4px 0">
     <span class="status ok">${cnt('ok')} ok</span>
     <span class="status orphan">${cnt('orphan')} orphan</span>
     <span class="status broken">${cnt('broken')} broken</span>
     · verify problems: <b>${problems}</b></p>
     ${problems ? `<ul>${hw.flatMap((x) => (x.problems || []).map((p) => `<li><code>${esc(x.id)}</code> ${esc(p)}</li>`)).join('')}</ul>` : ''}
-  </section>`;
+    </div></div></section>`;
 
   const sorted = [...(model.activity || [])].sort((a, b) => String(b.at).localeCompare(String(a.at)));
   const activityRows = sorted.length
@@ -299,22 +496,51 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
         .join('')
     : '<li class="empty">none</li>';
 
-  const contribRows = (model.contributions || [])
-    .map((c) => `<tr><td>${esc(c.user)}</td><td>${c.created}</td><td>${c.touched}</td></tr>`)
-    .join('');
+  const sparklineSvg = renderSparkline(model.activitySparkline || []);
+  const contribBarSvg = renderBarChart(model.contributions || []);
   const contributions = `<section class="card overview-only"><h2>Contributions</h2>
-    ${contribRows ? `<table><thead><tr><th>user</th><th>created</th><th>touched</th></tr></thead><tbody>${contribRows}</tbody></table>` : '<p class="empty">none</p>'}
+    ${contribBarSvg || '<p class="empty">no contributions yet</p>'}
   </section>`;
 
   const userRows = model.users.map((u) => `<tr><td>${esc(u.username)}</td><td>${esc(u.registeredAt)}</td></tr>`).join('');
 
-  const overviewPanel = `<div class="panel" data-panel="overview"><div class="grid-2">
+  // KPI aggregates
+  const totalAdrs = model.workspaces.reduce((n, w) => n + (w.adrs || []).length, 0);
+  const recentActivityCount = (model.activity || []).length;
+  const hs2 = model.healthSummary || { ok: 0, orphan: 0, broken: 0, total: 0 };
+
+  const kpiRow = `<div class="kpi-row">
+    <div class="kpi-card">
+      <div class="kpi-label">Workspaces</div>
+      <div class="kpi-value" style="color:var(--in-color-fg)">${model.workspaces.length}</div>
+      <div class="kpi-sub">${hs2.ok} healthy</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">ADRs</div>
+      <div class="kpi-value" style="color:var(--in-color-accent)">${totalAdrs}</div>
+      <div class="kpi-sub">across ${model.workspaces.length} workspace(s)</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Health</div>
+      <div class="kpi-value" style="color:var(--in-color-ok)">${hs2.ok}<span style="font-size:var(--in-size-base);color:var(--in-color-mut);font-weight:400">/${hs2.total}</span></div>
+      <div class="kpi-sub"><span style="color:var(--in-color-ok)">${hs2.ok} ok</span> · <span style="color:var(--in-color-warn)">${hs2.orphan} orphan</span> · <span style="color:var(--in-color-bad)">${hs2.broken} broken</span></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Activity</div>
+      <div class="kpi-value" style="color:var(--in-color-fg-dim)">${recentActivityCount}</div>
+      <div class="kpi-sub">total events</div>
+    </div>
+  </div>`;
+
+  const overviewPanel = `<div class="panel" data-panel="overview">
+    ${kpiRow}
+    <div class="grid-2">
     <div class="col">
       ${healthBar}
       ${wsCards || '<p class="empty">No workspaces yet.</p>'}
     </div>
     <div class="col">
-      <section class="card"><h2>Activity pulse</h2><ul class="feed">${activityRows}</ul></section>
+      <section class="card"><h2>Activity pulse</h2>${sparklineSvg ? `<div style="margin-bottom:12px">${sparklineSvg}</div>` : ''}<ul class="feed">${activityRows}</ul></section>
       ${contributions}
       <section class="card"><h2>Users</h2>
       ${model.users.length ? `<table><thead><tr><th>username</th><th>registeredAt</th></tr></thead><tbody>${userRows}</tbody></table>` : '<p class="empty">none</p>'}
@@ -322,20 +548,28 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
     </div>
   </div></div>`;
 
-  // ---- ADR panel: active ADRs top-level; superseded folded beneath ----
-  const adrPanel = `<div class="panel reading" data-panel="adr">${
-    model.workspaces
-      .map((w) => {
-        const byId = new Map(w.adrs.map((a) => [a.id, a]));
-        const visited = new Set();
-        const tops = w.adrs.filter((a) => a.active);
-        const cards = tops.map((a) => renderAdrCard(a, byId, visited, true)).join('');
-        return `<section class="ws-block"><h2 class="ws-h">${esc(w.title || w.id)} <span class="mut">${tops.length} active / ${w.adrs.length} total</span></h2>${
-          cards || '<p class="empty">no ADRs</p>'
-        }</section>`;
-      })
-      .join('') || '<p class="empty">No workspaces yet.</p>'
-  }</div>`;
+  // ---- ADR panel: list view (compact) + detail view placeholder ----
+  const adrPanel = `<div class="panel" data-panel="adr">
+    <div class="adr-list-view" data-adr-list>${
+      model.workspaces
+        .map((w) => {
+          const listItems = renderAdrListItems(w.supersessionChains, w.id);
+          const chainCount = w.supersessionChains ? w.supersessionChains.length : 0;
+          return `<section class="ws-block"><h2 class="ws-h">${esc(w.title || w.id)} <span class="mut">${chainCount} chain(s) · ${w.adrs.length} ADRs</span></h2>${
+            listItems || '<p class="empty">no ADRs</p>'
+          }</section>`;
+        })
+        .join('') || '<p class="empty">No workspaces yet.</p>'
+    }</div>
+    <div class="adr-detail-view" data-adr-detail style="display:none">
+      <button class="adr-back-btn" onclick="showAdrList()" style="background:var(--in-color-surface);border:1px solid var(--in-color-line);color:var(--in-color-fg);border-radius:var(--in-radius-sm);padding:6px 14px;cursor:pointer;font:inherit;margin-bottom:16px">
+        <svg class="svg-icon"><use href="#icon-back"/></svg> Back to list
+      </button>
+      <div class="adr-breadcrumb" style="font-size:var(--in-size-xs);color:var(--in-color-mut);margin-bottom:12px"></div>
+      <div class="adr-detail-content"></div>
+      <div class="adr-timeline" style="margin-top:24px"></div>
+    </div>
+  </div>`;
 
   // ---- Context panel: public glossary + staging (self/overview) ----
   const contextPanel = `<div class="panel reading" data-panel="context">${
@@ -366,47 +600,182 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
   return `<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inlay</title>
 <style>
-  :root{--bg:#0d1117;--surface:#161b22;--card:#1a2027;--line:#222b34;--fg:#e6edf3;--mut:#8b98a5;--accent:#4ea1ff;--ok:#2ea043;--warn:#d29922;--bad:#f85149}
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,Segoe UI,Roboto,sans-serif}
-  .appbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:20px;padding:12px 28px;background:rgba(13,17,23,.85);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
-  .brand{font-weight:700;font-size:16px;letter-spacing:.02em} .brand small{color:var(--mut);font-weight:400;margin-left:8px;font-size:12px}
-  nav.tabs{display:flex;gap:4px} nav.tabs button{background:transparent;border:0;color:var(--mut);padding:7px 14px;border-radius:8px;cursor:pointer;font:inherit}
-  nav.tabs button:hover{color:var(--fg);background:rgba(255,255,255,.04)} nav.tabs button[aria-current=true]{color:var(--fg);background:rgba(78,161,255,.14)}
+  :root{
+    /* Slate Indigo color system — surface layering: bg → surface → card → elevated */
+    --in-color-bg:#0F172A;--in-color-surface:#1E293B;--in-color-card:#172033;--in-color-elevated:#1E2D47;
+    --in-color-line:rgba(255,255,255,.06);--in-color-line-strong:rgba(255,255,255,.10);
+    --in-color-fg:#EDEDEF;--in-color-fg-dim:#CBD5E1;--in-color-mut:#94A3B8;
+    --in-color-accent:#818CF8;--in-color-accent-soft:rgba(129,140,248,.12);--in-color-accent-glow:rgba(129,140,248,.18);
+    --in-color-ok:#22C55E;--in-color-ok-soft:rgba(34,197,94,.10);--in-color-ok-glow:rgba(34,197,94,.18);
+    --in-color-warn:#F59E0B;--in-color-warn-soft:rgba(245,158,11,.10);
+    --in-color-bad:#EF4444;--in-color-bad-soft:rgba(239,68,68,.10);
+    --in-color-code-bg:rgba(0,0,0,.25);--in-color-input-bg:rgba(0,0,0,.20);
+    /* spacing (4px grid) */
+    --in-space-xs:4px;--in-space-sm:8px;--in-space-md:16px;--in-space-lg:24px;--in-space-xl:32px;--in-space-2xl:48px;
+    /* font sizes */
+    --in-size-xs:12px;--in-size-sm:13px;--in-size-base:14px;--in-size-md:16px;--in-size-lg:18px;--in-size-xl:24px;--in-size-2xl:28px;
+    /* font families */
+    --in-font-mono:"Fira Code",Consolas,"Courier New",monospace;--in-font-sans:"Fira Sans","Segoe UI",system-ui,sans-serif;
+    /* radii */
+    --in-radius-sm:6px;--in-radius-md:10px;--in-radius-lg:14px;--in-radius-xl:18px;--in-radius-pill:999px;
+    /* shadows & effects */
+    --in-shadow-sm:0 1px 2px rgba(0,0,0,.30);--in-shadow-md:0 4px 12px rgba(0,0,0,.40);--in-shadow-glow:0 0 24px var(--in-color-ok-glow);
+    --in-ease-out:cubic-bezier(.16,1,.3,1);--in-ease-in:cubic-bezier(.4,0,1,1);--in-ease-spring:cubic-bezier(.34,1.56,.64,1);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--in-color-bg);color:var(--in-color-fg);font:var(--in-size-base)/1.6 var(--in-font-sans);-webkit-font-smoothing:antialiased}
+  /* focus ring */
+  :focus-visible{outline:2px solid var(--in-color-accent);outline-offset:2px;border-radius:var(--in-radius-sm)}
+  /* ---- appbar ---- */
+  .appbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:var(--in-space-lg);padding:10px var(--in-space-xl);background:rgba(15,23,42,.85);backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);border-bottom:1px solid var(--in-color-line);box-shadow:0 1px 0 rgba(255,255,255,.02)}
+  .brand{font-weight:700;font-size:var(--in-size-md);letter-spacing:.03em;font-family:var(--in-font-mono);color:var(--in-color-fg);display:flex;align-items:baseline;gap:var(--in-space-sm)} .brand small{color:var(--in-color-mut);font-weight:400;font-size:var(--in-size-xs);opacity:.7}
+  /* tab navigation */
+  nav.tabs{display:flex;gap:2px;background:var(--in-color-input-bg);border:1px solid var(--in-color-line);border-radius:var(--in-radius-md);padding:3px}
+  nav.tabs button{background:transparent;border:0;color:var(--in-color-mut);padding:6px 16px;border-radius:var(--in-radius-sm);cursor:pointer;font:inherit;font-size:var(--in-size-sm);font-weight:500;transition:all .2s var(--in-ease-out)}
+  nav.tabs button:hover{color:var(--in-color-fg)} nav.tabs button[aria-current=true]{color:var(--in-color-fg);background:var(--in-color-accent-soft);box-shadow:var(--in-shadow-sm)}
   .spacer{flex:1}
-  .lens{display:inline-flex;background:#0b0f14;border:1px solid var(--line);border-radius:999px;padding:2px}
-  .lens button{background:transparent;border:0;color:var(--mut);padding:5px 12px;border-radius:999px;cursor:pointer;font:inherit;font-size:12px}
-  .lens button[aria-pressed=true]{color:#fff;background:var(--accent)}
-  .tools{display:flex;gap:8px;align-items:center}
-  .tools input,.tools select{background:#0b0f14;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 10px;font:inherit;font-size:13px}
-  main{padding:24px 28px;max-width:1180px;margin:0 auto}
-  .panel{display:none} body[data-view="overview"] [data-panel="overview"],body[data-view="adr"] [data-panel="adr"],body[data-view="context"] [data-panel="context"]{display:block}
-  .grid-2{display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start} .col{display:grid;gap:18px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
-  h2{margin:0 0 6px;font-size:16px} h3{margin:14px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
-  .meta,.mut,.hint{color:var(--mut);font-size:12px} .hint{margin:0 0 14px}
-  table{width:100%;border-collapse:collapse;font-size:13px} th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top} th{color:var(--mut);font-weight:600}
-  code{background:#0b0f14;padding:1px 6px;border-radius:5px;color:var(--accent);font-size:12px}
-  .pill{display:inline-block;background:#0b0f14;border:1px solid #2a3640;border-radius:999px;padding:1px 9px;font-size:12px;color:var(--fg);margin:1px 0}
-  .pill.mine{border-color:var(--accent);color:#cfe6ff}
-  .status{font-size:11px;padding:2px 9px;border-radius:999px;margin-right:4px}
-  .status.ok{background:rgba(46,160,67,.15);color:var(--ok)} .status.orphan{background:rgba(210,153,34,.15);color:var(--warn)} .status.broken{background:rgba(248,81,73,.15);color:var(--bad)}
-  .empty{color:var(--mut)} ul{margin:6px 0;padding-left:18px} li{margin:3px 0} .feed li{list-style:none} .feed{padding-left:0}
-  .graph{overflow-x:auto;border:1px solid var(--line);border-radius:10px;margin-top:6px;background:#11161d}
+  /* lens toggle */
+  .lens{display:inline-flex;background:var(--in-color-input-bg);border:1px solid var(--in-color-line);border-radius:var(--in-radius-pill);padding:2px}
+  .lens button{background:transparent;border:0;color:var(--in-color-mut);padding:5px 14px;border-radius:var(--in-radius-pill);cursor:pointer;font:inherit;font-size:var(--in-size-xs);font-weight:500;transition:all .2s var(--in-ease-out)}
+  .lens button[aria-pressed=true]{color:#fff;background:var(--in-color-accent);box-shadow:0 2px 8px rgba(129,140,248,.25)}
+  /* search / filter tools */
+  .tools{display:flex;gap:var(--in-space-sm);align-items:center}
+  .tools input,.tools select{background:var(--in-color-input-bg);border:1px solid var(--in-color-line);color:var(--in-color-fg);border-radius:var(--in-radius-sm);padding:7px 12px;font:inherit;font-size:var(--in-size-sm);transition:border-color .2s var(--in-ease-out),box-shadow .2s var(--in-ease-out)}
+  .tools input:focus,.tools select:focus{border-color:var(--in-color-accent);box-shadow:0 0 0 3px var(--in-color-accent-soft);outline:none}
+  /* ---- main layout ---- */
+  main{padding:var(--in-space-xl) var(--in-space-xl);max-width:1200px;margin:0 auto}
+  .panel{display:none;animation:fadeIn .2s var(--in-ease-out)} body[data-view="overview"] [data-panel="overview"],body[data-view="adr"] [data-panel="adr"],body[data-view="context"] [data-panel="context"]{display:block}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  /* overview grid */
+  .grid-2{display:grid;grid-template-columns:1fr 360px;gap:var(--in-space-lg);align-items:start} .col{display:grid;gap:var(--in-space-md)}
+  /* KPI row */
+  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--in-space-md);margin-bottom:var(--in-space-md)}
+  .kpi-card{background:var(--in-color-elevated);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:var(--in-space-md) 20px;position:relative;overflow:hidden;transition:border-color .25s var(--in-ease-out),box-shadow .25s var(--in-ease-out),transform .25s var(--in-ease-out)}
+  .kpi-card::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.06) 20%,rgba(255,255,255,.10) 50%,rgba(255,255,255,.06) 80%,transparent);opacity:0;transition:opacity .25s var(--in-ease-out)}
+  .kpi-card:hover{border-color:var(--in-color-line-strong);box-shadow:0 4px 20px rgba(0,0,0,.3);transform:translateY(-1px)} .kpi-card:hover::before{opacity:1}
+  .kpi-card .kpi-label{font-size:var(--in-size-xs);color:var(--in-color-mut);text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px}
+  .kpi-card .kpi-value{font-size:var(--in-size-2xl);font-weight:700;font-family:var(--in-font-mono);line-height:1.1}
+  .kpi-card .kpi-sub{font-size:var(--in-size-xs);color:var(--in-color-mut);margin-top:4px}
+  /* cards */
+  .card{background:var(--in-color-card);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:var(--in-space-lg) 20px;transition:border-color .2s var(--in-ease-out)}
+  .card:hover{border-color:var(--in-color-line-strong)}
+  .card.kpi{border-color:rgba(34,197,94,.15);background:var(--in-color-elevated);position:relative;overflow:hidden}
+  .card.kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--in-color-ok-glow),transparent)}
+  /* headings */
+  h2{margin:0 0 8px;font-size:var(--in-size-md);font-weight:600;letter-spacing:.01em;color:var(--in-color-fg-dim)}
+  h3{margin:18px 0 8px;font-size:var(--in-size-xs);text-transform:uppercase;letter-spacing:.07em;color:var(--in-color-mut);font-weight:600}
+  .meta,.mut,.hint{color:var(--in-color-mut);font-size:var(--in-size-xs)} .hint{margin:0 0 14px}
+  /* tables */
+  table{width:100%;border-collapse:collapse;font-size:var(--in-size-sm)} th,td{text-align:left;padding:10px 10px;border-bottom:1px solid var(--in-color-line);vertical-align:top} th{color:var(--in-color-mut);font-weight:600;cursor:pointer;user-select:none;transition:color .15s;font-size:var(--in-size-xs);text-transform:uppercase;letter-spacing:.04em}
+  th:hover{color:var(--in-color-fg)} th[aria-sort]{color:var(--in-color-accent)}
+  th[aria-sort]::after{display:inline-block;margin-left:4px;font-size:10px}
+  th[aria-sort=ascending]::after{content:"▲"} th[aria-sort=descending]::after{content:"▼"}
+  /* inline code */
+  code{background:var(--in-color-code-bg);padding:1px 6px;border-radius:var(--in-radius-sm);color:var(--in-color-accent);font-size:var(--in-size-xs);font-family:var(--in-font-mono)}
+  pre{background:var(--in-color-bg);border:1px solid var(--in-color-line);border-radius:var(--in-radius-md);padding:var(--in-space-md);overflow-x:auto;position:relative}
+  pre code{background:transparent;padding:0;color:var(--in-color-fg);font-size:var(--in-size-sm)}
+  .copy-btn{position:absolute;top:8px;right:8px;background:var(--in-color-surface);border:1px solid var(--in-color-line);color:var(--in-color-mut);border-radius:var(--in-radius-sm);padding:4px 8px;cursor:pointer;font-size:var(--in-size-xs);transition:all .15s var(--in-ease-out);opacity:0}
+  pre:hover .copy-btn{opacity:1} .copy-btn:hover{color:var(--in-color-fg);border-color:var(--in-color-accent)}
+  .copy-btn.copied{color:var(--in-color-ok);border-color:var(--in-color-ok)}
+  /* pills & status */
+  .pill{display:inline-flex;align-items:center;background:var(--in-color-code-bg);border:1px solid var(--in-color-line);border-radius:var(--in-radius-pill);padding:2px 10px;font-size:var(--in-size-xs);color:var(--in-color-fg);margin:1px 0;font-weight:500}
+  .pill.mine{border-color:var(--in-color-accent);color:var(--in-color-accent)}
+  /* status badges */
+  .status{font-size:10px;padding:3px 10px;border-radius:var(--in-radius-pill);margin-right:4px;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+  .status.ok{background:var(--in-color-ok-soft);color:var(--in-color-ok)} .status.orphan{background:var(--in-color-warn-soft);color:var(--in-color-warn)} .status.broken{background:var(--in-color-bad-soft);color:var(--in-color-bad)}
+  .empty{color:var(--in-color-mut)} ul{margin:6px 0;padding-left:18px} li{margin:3px 0} .feed li{list-style:none;padding:5px 0} .feed{padding-left:0}
+  /* SVG icon sprite */
+  .svg-icon{width:18px;height:18px;display:inline-block;vertical-align:middle;flex-shrink:0} .svg-icon.sm{width:14px;height:14px} .svg-icon.lg{width:24px;height:24px}
+  /* ADR graph */
+  .graph-wrap{position:relative;overflow:hidden;border:1px solid var(--in-color-line);border-radius:var(--in-radius-md);margin-top:8px;background:var(--in-color-bg);cursor:grab;user-select:none;-webkit-user-select:none;transition:border-color .2s}
+  .graph-wrap:hover{border-color:var(--in-color-line-strong)}
+  .graph-wrap:active{cursor:grabbing}
+  .graph-wrap svg{display:block}
+  .graph-node{cursor:pointer;transition:opacity .15s}
+  .graph-node:hover circle{stroke:var(--in-color-accent);stroke-width:2.5;filter:drop-shadow(0 0 4px var(--in-color-accent-glow))}
+  .graph-node:active{opacity:.7}
+  .graph-controls{position:absolute;bottom:8px;right:8px;display:flex;gap:2px;z-index:2}
+  .graph-zoom-btn{background:var(--in-color-surface);border:1px solid var(--in-color-line);color:var(--in-color-fg);border-radius:var(--in-radius-sm);width:28px;height:28px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;line-height:1;padding:0;font-family:var(--in-font-mono);transition:all .15s var(--in-ease-out)}
+  .graph-zoom-btn:hover{background:var(--in-color-accent-soft);border-color:var(--in-color-accent)}
   /* reading panels */
-  .reading{max-width:860px;margin:0 auto} .ws-block{margin-bottom:34px} .ws-h{font-size:18px;border-bottom:1px solid var(--line);padding-bottom:8px}
-  .adr-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin:14px 0}
-  .adr-card .adr-title{font-size:16px;text-transform:none;letter-spacing:0;color:var(--fg);margin:0 0 4px}
-  .adr-card.is-superseded{opacity:.85;border-style:dashed;margin:10px 0}
-  .superseded-wrap{margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}
-  .superseded-wrap>summary{cursor:pointer;color:var(--mut);font-size:12px;list-style:none}
-  .superseded-wrap>summary:hover{color:var(--fg)} .superseded-wrap[open]>summary{color:var(--fg)}
-  .refs{font-size:12px;color:var(--mut);margin-top:8px} .refs a{color:var(--accent);text-decoration:none}
-  .prose{font-size:14px} .prose h3,.prose h4,.prose h5{text-transform:none;letter-spacing:0;color:var(--fg);margin:10px 0 4px} .prose p{margin:6px 0} .prose code{font-size:13px}
-  .glossary,.staging{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin:12px 0}
-  .staging.mine{border-color:rgba(78,161,255,.4)}
+  .reading{max-width:860px;margin:0 auto} .ws-block{margin-bottom:40px} .ws-h{font-size:var(--in-size-lg);font-weight:600;border-bottom:1px solid var(--in-color-line);padding-bottom:var(--in-space-sm);margin-bottom:var(--in-space-md);color:var(--in-color-fg-dim)}
+  /* ADR cards & list items */
+  .adr-card{background:var(--in-color-card);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:16px 20px;margin:14px 0;transition:border-color .2s var(--in-ease-out)}
+  .adr-card:hover{border-color:var(--in-color-line-strong)}
+  .adr-card .adr-title{font-size:var(--in-size-md);text-transform:none;letter-spacing:0;color:var(--in-color-fg);margin:0 0 4px}
+  .adr-card.is-superseded{opacity:.72;border-style:dashed;margin:10px 0}
+  .adr-list-item{cursor:pointer;border:1px solid var(--in-color-line);border-radius:var(--in-radius-md);padding:14px 16px;margin:6px 0;transition:all .2s var(--in-ease-out)}
+  .adr-list-item:hover{border-color:var(--in-color-line-strong);background:rgba(255,255,255,.02);transform:translateX(2px)}
+  .adr-list-item .chain-badge{display:inline-flex;align-items:center;gap:4px;font-size:var(--in-size-xs);color:var(--in-color-mut);margin-left:var(--in-space-sm)}
+  .chain-badge.chain-toggle{cursor:pointer;transition:color .15s}.chain-badge.chain-toggle:hover{color:var(--in-color-accent)}
+  .chain-badge.chain-toggle[aria-expanded=true] .chevron{transform:rotate(180deg)}
+  .chain-badge.chain-toggle .chevron{transition:transform .2s var(--in-ease-out)}
+  .chain-history-item{display:flex;align-items:center;gap:6px;padding:7px 10px;margin:2px 0;border-radius:var(--in-radius-sm);cursor:pointer;transition:all .15s var(--in-ease-out);font-size:var(--in-size-sm)}
+  .chain-history-item:hover{background:rgba(255,255,255,.03);transform:translateX(2px)}
+  .chain-history-item .status{font-size:10px;padding:1px 7px}
+  /* superseded fold */
+  .superseded-wrap{margin-top:12px;border-top:1px dashed var(--in-color-line);padding-top:10px}
+  .superseded-wrap>summary{cursor:pointer;color:var(--in-color-mut);font-size:var(--in-size-xs);list-style:none;transition:color .15s}
+  .superseded-wrap>summary:hover{color:var(--in-color-fg)} .superseded-wrap[open]>summary{color:var(--in-color-fg)}
+  /* history timeline */
+  .timeline{position:relative;padding-left:var(--in-space-lg);margin:var(--in-space-md) 0}
+  .timeline::before{content:"";position:absolute;left:8px;top:4px;bottom:4px;width:1.5px;background:var(--in-color-line-strong)}
+  .timeline-item{position:relative;padding:8px 0;padding-left:var(--in-space-md)}
+  .timeline-item::before{content:"";position:absolute;left:-19px;top:14px;width:8px;height:8px;border-radius:50%;background:var(--in-color-mut)}
+  .timeline-item.current::before{background:var(--in-color-ok);box-shadow:0 0 8px var(--in-color-ok-glow)}
+  /* refs / links */
+  .refs{font-size:var(--in-size-xs);color:var(--in-color-mut);margin-top:var(--in-space-sm)} .refs a{color:var(--in-color-accent);text-decoration:none;transition:color .15s}
+  .refs a:hover{text-decoration:underline}
+  /* prose / markdown */
+  .prose{font-size:var(--in-size-base);line-height:1.7;max-width:72ch} .prose h3,.prose h4,.prose h5{text-transform:none;letter-spacing:0;color:var(--in-color-fg);margin:10px 0 4px} .prose p{margin:8px 0} .prose code{font-size:var(--in-size-sm)}
+  /* context panel */
+  .glossary,.staging{background:var(--in-color-card);border:1px solid var(--in-color-line);border-radius:var(--in-radius-lg);padding:16px 20px;margin:14px 0;transition:border-color .2s var(--in-ease-out)}
+  .glossary:hover,.staging:hover{border-color:var(--in-color-line-strong)}
+  .staging.mine{border-color:rgba(129,140,248,.30)}
   body.lens-self .overview-only{display:none}
+  /* reduced motion */
+  @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+  /* mobile responsive (≤768px) */
+  @media(max-width:768px){
+    main{padding:var(--in-space-md)}
+    .kpi-row{grid-template-columns:repeat(2,1fr);gap:var(--in-space-sm)}
+    .grid-2{grid-template-columns:1fr}
+    .appbar{flex-wrap:wrap;gap:var(--in-space-sm);padding:var(--in-space-sm) var(--in-space-md)}
+    .appbar .spacer{display:none}
+    .brand{font-size:var(--in-size-base)}
+    nav.tabs{order:3;width:100%;justify-content:stretch}
+    nav.tabs button{flex:1;text-align:center}
+    .tools{order:2} .lens{order:1}
+    .reading{max-width:100%}
+    table{font-size:var(--in-size-xs)}
+  }
+  /* print styles */
+  @media print{
+    .appbar,nav.tabs,.tools,.lens,.copy-btn,svg.icon-sprite{display:none!important}
+    body{background:#fff;color:#000;font-size:12pt}
+    .panel{display:block!important;margin-bottom:2em}
+    .card,.adr-card,.glossary,.staging,.kpi-card{border:1px solid #ccc;box-shadow:none;break-inside:avoid;background:#fff}
+    .kpi-card::before,.card.kpi::before{display:none}
+    a{color:#000;text-decoration:underline}
+    .refs a::after{content:" (" attr(href) ")"}
+    .status{color:#000!important;background:#eee!important}
+  }
 </style></head>
 <body data-default-lens="${lens}" class="lens-${lens}" data-view="overview">
+<!-- SVG icon sprite (hidden) -->
+<svg aria-hidden="true" style="display:none" class="icon-sprite">
+  <defs>
+    <symbol id="icon-overview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></symbol>
+    <symbol id="icon-adr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></symbol>
+    <symbol id="icon-context" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
+    <symbol id="icon-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></symbol>
+    <symbol id="icon-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+    <symbol id="icon-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+  </defs>
+</svg>
 <div class="appbar">
   <span class="brand">Inlay<small>${esc(model.root)}</small></span>
   <nav class="tabs">
@@ -439,31 +808,259 @@ export function renderHtml(model, { defaultLens = 'self' } = {}) {
 <script>
 (function(){
   var body=document.body;
+  var M=JSON.parse(document.getElementById('inlay-model').textContent);
   function setLens(l){
     body.classList.remove('lens-self','lens-overview'); body.classList.add('lens-'+l);
     var b=document.querySelectorAll('[data-lens-btn]');
-    for(var i=0;i<b.length;i++){ b[i].setAttribute('aria-pressed', b[i].getAttribute('data-lens-btn')===l?'true':'false'); }
+    for(var i=0;i<b.length;i++) b[i].setAttribute('aria-pressed', b[i].getAttribute('data-lens-btn')===l?'true':'false');
   }
   function setView(v){
     body.setAttribute('data-view',v);
+    // exit ADR detail mode when switching panels (keyboard/nav)
+    var dv=document.querySelector('[data-adr-detail]');
+    var inDetail=dv&&dv.style.display!=='none';
+    if(inDetail){dv.style.display='none';var lv=document.querySelector('[data-adr-list]');if(lv)lv.style.display='';}
     var b=document.querySelectorAll('[data-nav]');
-    for(var i=0;i<b.length;i++){ b[i].setAttribute('aria-current', b[i].getAttribute('data-nav')===v?'true':'false'); }
+    for(var i=0;i<b.length;i++) b[i].setAttribute('aria-current', b[i].getAttribute('data-nav')===v?'true':'false');
+    if(inDetail){location.hash='#'+v;}else{updateHash();}
   }
-  var lb=document.querySelectorAll('[data-lens-btn]');
-  for(var i=0;i<lb.length;i++){ (function(x){ x.addEventListener('click',function(){ setLens(x.getAttribute('data-lens-btn')); }); })(lb[i]); }
-  var nb=document.querySelectorAll('[data-nav]');
-  for(var j=0;j<nb.length;j++){ (function(x){ x.addEventListener('click',function(){ setView(x.getAttribute('data-nav')); }); })(nb[j]); }
-  setLens(body.getAttribute('data-default-lens')||'self'); setView('overview');
+  /* ---- hash routing ---- */
+  function readHash(){
+    var h=location.hash.replace(/^#/,'');
+    if(!h) return {view:'overview'};
+    var parts=h.split('/');
+    if(parts[0]==='adr' && parts.length>=3) return {view:'adr',ws:parts[1],adrId:parts[2]};
+    if(parts[0]==='overview'||parts[0]==='adr'||parts[0]==='context') return {view:parts[0]};
+    return {view:'overview'};
+  }
+  function updateHash(){
+    var h=location.hash.replace(/^#/,'');
+    if(/^adr\\//.test(h)) return; // ADR detail manages its own hash
+    location.hash='#'+(body.getAttribute('data-view')||'overview');
+  }
+  function showAdrList(){
+    var lv=document.querySelector('[data-adr-list]');
+    var dv=document.querySelector('[data-adr-detail]');
+    if(lv) lv.style.display=''; if(dv) dv.style.display='none';
+    history.pushState(null,'','#'+(body.getAttribute('data-view')||'adr'));
+  }
+  window.showAdrList=showAdrList;
+  function showAdrDetail(ws,adrId){
+    // update nav state manually — don't call setView which would exit detail
+    body.setAttribute('data-view','adr');
+    var nb=document.querySelectorAll('[data-nav]');
+    for(var i=0;i<nb.length;i++) nb[i].setAttribute('aria-current',nb[i].getAttribute('data-nav')==='adr'?'true':'false');
+    var adrs=(M.workspaces.find(function(w){return w.id===ws;})||{}).adrs||[];
+    var byId={}; adrs.forEach(function(a){byId[a.id]=a;});
+    var adr=byId[adrId]; if(!adr) return;
+    var dv=document.querySelector('[data-adr-detail]');
+    var lv=document.querySelector('[data-adr-list]');
+    var bc=document.querySelector('.adr-breadcrumb');
+    var content=document.querySelector('.adr-detail-content');
+    var timeline=document.querySelector('.adr-timeline');
+    if(lv) lv.style.display='none'; if(dv) dv.style.display='';
+    if(bc) bc.innerHTML=ws+' <span style="color:var(--in-color-mut)">/</span> '+esc(adr.title);
+    if(content){
+      var rels=(adr.supersedes||[]).concat(adr.related||[]).filter(Boolean).map(function(r){var id=typeof r==='string'?r:r&&r.id;return id?'<a href="#adr/'+esc(ws)+'/'+esc(id)+'">'+esc(id)+'</a>':'';}).join(', ');
+      content.innerHTML='<article class="adr-card"><h3 class="adr-title">'+esc(adr.title)+' <span class="pill">'+esc(adr.status)+'</span></h3><div class="meta">id <code>'+esc(adr.id)+'</code> · by '+esc(adr.createdBy)+' · '+esc((adr.createdAt||'').slice(0,10))+(adr.active?'':' · superseded')+'</div><div class="prose">'+(adr.body?mdToHtml(adr.body):'<p class="empty">no body</p>')+'</div>'+(rels?'<div class="refs">related: '+rels+'</div>':'')+'</article>';
+    }
+    if(timeline&&adrs.length>1){
+      var chain=buildChain(adrs,adrId);
+      if(chain.length>1) timeline.innerHTML=renderTimeline(chain,adrId);
+      else timeline.innerHTML='';
+    }else if(timeline) timeline.innerHTML='';
+    location.hash='#adr/'+ws+'/'+adrId;
+  }
+  window.showAdrDetail=showAdrDetail;
+  function buildChain(adrs,currentId){
+    var byId={}; adrs.forEach(function(a){byId[a.id]=a;});
+    var chain=[],visited={},stack=[byId[currentId]];
+    while(stack.length){var a=stack.pop();if(!a||visited[a.id]) continue;visited[a.id]=true;chain.push(a);(a.supersedes||[]).forEach(function(r){var id=typeof r==='string'?r:r&&r.id;if(id&&byId[id]&&!visited[id]) stack.push(byId[id]);});}
+    return chain;
+  }
+  function renderTimeline(chain,currentId){
+    return '<div class="timeline">'+chain.map(function(a,i){return '<div class="timeline-item'+(a.id===currentId?' current':'')+'"><div style="font-size:var(--in-size-sm)"><strong>'+esc(a.title)+'</strong> <span class="status '+(a.status==='accepted'?'ok':a.status==='rejected'?'broken':'orphan')+'">'+esc(a.status)+'</span></div><div class="mut" style="font-size:var(--in-size-xs)">'+esc(a.createdBy)+' · '+esc((a.createdAt||'').slice(0,10))+'</div></div>';}).join('')+'</div>';
+  }
+  /* ---- init view from hash ---- */
+  function applyHash(){
+    var st=readHash();
+    if(st.ws && st.adrId){showAdrDetail(st.ws,st.adrId);}
+    else{setView(st.view||'overview');}
+  }
+  window.addEventListener('hashchange',applyHash);
+  /* ---- helpers ---- */
+  function esc(s){return String(s||'').replace(/[&<>"]/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];});}
+  function mdToHtml(md){
+    var lines=String(md||'').replace(/\\r\\n/g,'\\n').split('\\n'),out=[],inList=false,para=[];
+    function inline(s){return esc(s).replace(/\\*\\*([^\\*]+)\\*\\*/g,'<strong>$1</strong>').replace(/\x60([^\x60]+)\x60/g,'<code>$1</code>');}
+    function flushPara(){if(para.length){out.push('<p>'+inline(para.join(' '))+'</p>');para=[];}}
+    function closeList(){if(inList){out.push('</ul>');inList=false;}}
+    for(var i=0;i<lines.length;i++){
+      var line=lines[i].replace(/\\s+$/,''),h=line.match(/^(#{1,3})\\s+(.*)$/),li=line.match(/^[-*]\\s+(.*)$/);
+      if(h){flushPara();closeList();out.push('<h'+(h[1].length+2)+'>'+inline(h[2])+'</h'+(h[1].length+2)+'>');}
+      else if(li){flushPara();if(!inList){out.push('<ul>');inList=true;}out.push('<li>'+inline(li[1])+'</li>');}
+      else if(!line.trim()){flushPara();closeList();}
+      else{closeList();para.push(line.trim());}
+    }
+    flushPara();closeList();return out.join('\\n');
+  }
+  /* ---- keyboard shortcuts ---- */
+  document.addEventListener('keydown',function(e){
+    if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT'){
+      if(e.key==='Escape'){e.target.blur();return;}
+      return;
+    }
+    if(e.key==='1') setView('overview');
+    else if(e.key==='2') setView('adr');
+    else if(e.key==='3') setView('context');
+    else if(e.key==='/'||e.key==='s'){e.preventDefault();var q=document.getElementById('q');if(q) q.focus();}
+    else if(e.key==='Escape'){if(document.querySelector('[data-adr-detail]')&&document.querySelector('[data-adr-detail]').style.display!=='none'){showAdrList();}else{document.getElementById('q').blur();}}
+    else if(e.key==='?'&&!e.shiftKey){alert('Keyboard Shortcuts:\\n1/2/3 — Switch panels\\n/ — Search\\nEsc — Back / Close\\n? — This help');}
+  });
+  /* ---- full-text search ---- */
+  var searchTimer=null;
   function applyFilters(){
-    var qel=document.getElementById('q'), sel=document.getElementById('statusFilter');
-    var q=(qel&&qel.value||'').toLowerCase(), st=(sel&&sel.value)||'';
+    var qel=document.getElementById('q'),sel=document.getElementById('statusFilter');
+    var q=(qel&&qel.value||'').toLowerCase(),st=(sel&&sel.value)||'';
+    // table rows in overview
     var rows=document.querySelectorAll('tr[data-row]');
-    for(var i=0;i<rows.length;i++){ var tr=rows[i];
-      var okText=tr.getAttribute('data-row').indexOf(q)>=0, okStatus=!st||tr.getAttribute('data-status')===st;
-      tr.style.display=(okText&&okStatus)?'':'none'; }
+    for(var i=0;i<rows.length;i++){var tr=rows[i];
+      var okText=tr.getAttribute('data-row').indexOf(q)>=0,okStatus=!st||tr.getAttribute('data-status')===st;
+      tr.style.display=(okText&&okStatus)?'':'none';}
+    // build body-match set from inline model (fulll-text search over ADR body)
+    var bodyMatch=new Set();
+    if(q&&M.workspaces){for(var w=0;w<M.workspaces.length;w++){var adrs=M.workspaces[w].adrs||[];for(var a=0;a<adrs.length;a++){var adr=adrs[a];if(adr.body&&adr.body.toLowerCase().indexOf(q)>=0)bodyMatch.add(adr.id);}}}
+    // ADR list items: match text OR body
+    var items=document.querySelectorAll('.adr-list-item');
+    for(var j=0;j<items.length;j++){var it=items[j];
+      var text=(it.textContent||'').toLowerCase();
+      var adrId=it.getAttribute('data-adr-id');
+      var matchesBody=adrId&&bodyMatch.has(adrId);
+      it.style.display=(!q||text.indexOf(q)>=0||matchesBody)?'':'none';}
+    // also show chain-history items if their parent list item is visible
+    var histories=document.querySelectorAll('.chain-history');
+    for(var k=0;k<histories.length;k++){var h=histories[k];var parent=h.closest('.adr-list-item');if(parent&&parent.style.display==='none')h.style.display='none';}
   }
-  var qel=document.getElementById('q'); if(qel) qel.addEventListener('input',applyFilters);
-  var sel=document.getElementById('statusFilter'); if(sel) sel.addEventListener('change',applyFilters);
+  var qel=document.getElementById('q');if(qel) qel.addEventListener('input',function(){clearTimeout(searchTimer);searchTimer=setTimeout(applyFilters,150);});
+  var sel=document.getElementById('statusFilter');if(sel) sel.addEventListener('change',applyFilters);
+  /* ---- table column sorting ---- */
+  document.querySelectorAll('th').forEach(function(th){
+    th.addEventListener('click',function(){
+      var table=th.closest('table'),tbody=table&&table.querySelector('tbody');
+      if(!tbody) return;
+      var col=Array.prototype.indexOf.call(th.parentElement.children,th);
+      var rows=Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+      var dir=th.getAttribute('aria-sort')==='ascending'?'descending':'ascending';
+      rows.sort(function(a,b){
+        var ca=(a.children[col]||{}).textContent||'';
+        var cb=(b.children[col]||{}).textContent||'';
+        return dir==='ascending'?ca.localeCompare(cb):cb.localeCompare(ca);
+      });
+      rows.forEach(function(r){tbody.appendChild(r);});
+      table.querySelectorAll('th').forEach(function(h){h.removeAttribute('aria-sort');});
+      th.setAttribute('aria-sort',dir);
+    });
+  });
+  /* ---- code block copy buttons ---- */
+  document.querySelectorAll('pre code').forEach(function(code){
+    var btn=document.createElement('button');btn.className='copy-btn';
+    btn.innerHTML='<svg class="svg-icon sm"><use href="#icon-copy"/></svg>';
+    btn.addEventListener('click',function(){
+      navigator.clipboard.writeText(code.textContent).then(function(){
+        btn.innerHTML='<svg class="svg-icon sm"><use href="#icon-check"/></svg>';
+        btn.classList.add('copied');
+        setTimeout(function(){btn.innerHTML='<svg class="svg-icon sm"><use href="#icon-copy"/></svg>';btn.classList.remove('copied');},1500);
+      }).catch(function(){});
+    });
+    code.parentElement.appendChild(btn);
+  });
+  /* ---- ADR list item click handlers ---- */
+  document.querySelectorAll('.adr-list-item').forEach(function(el){
+    el.addEventListener('click',function(){
+      var adrId=el.getAttribute('data-adr-id');
+      var ws=el.getAttribute('data-workspace');
+      if(adrId&&ws) showAdrDetail(ws,adrId);
+    });
+    el.addEventListener('keydown',function(e){if(e.key==='Enter'){el.click();}});
+  });
+  /* ---- chain history toggle ---- */
+  document.querySelectorAll('.chain-toggle').forEach(function(toggle){
+    toggle.addEventListener('click',function(e){
+      e.stopPropagation();
+      var item=toggle.closest('.adr-list-item');
+      var history=item&&item.querySelector('.chain-history');
+      if(!history) return;
+      var expanded=toggle.getAttribute('aria-expanded')==='true';
+      toggle.setAttribute('aria-expanded',expanded?'false':'true');
+      history.style.display=expanded?'none':'';
+    });
+    toggle.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle.click();}});
+  });
+  /* ---- chain history item navigation ---- */
+  document.querySelectorAll('.chain-history-item').forEach(function(el){
+    el.addEventListener('click',function(e){
+      e.stopPropagation();
+      var adrId=el.getAttribute('data-adr-id');
+      var ws=el.getAttribute('data-workspace');
+      if(adrId&&ws) showAdrDetail(ws,adrId);
+    });
+    el.addEventListener('keydown',function(e){if(e.key==='Enter'){el.click();}});
+  });
+  /* ---- nav button handlers ---- */
+  document.querySelectorAll('[data-nav]').forEach(function(btn){
+    btn.addEventListener('click',function(){ setView(btn.getAttribute('data-nav')); });
+  });
+  /* ---- lens button handlers ---- */
+  document.querySelectorAll('[data-lens-btn]').forEach(function(btn){
+    btn.addEventListener('click',function(){ setLens(btn.getAttribute('data-lens-btn')); });
+  });
+  /* ---- graph zoom/pan + node click navigation ---- */
+  (function(){
+    var wraps=document.querySelectorAll('.graph-wrap');
+    for(var gi=0;gi<wraps.length;gi++){(function(wrap){
+      var svg=wrap.querySelector('svg');
+      if(!svg) return;
+      var scale=1,tx=0,ty=0,dragging=false,hasMoved=false;
+      var startX,startY,initTx,initTy;
+      function apply(){svg.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')';}
+      function reset(){scale=1;tx=0;ty=0;apply();}
+      wrap.addEventListener('wheel',function(e){
+        e.preventDefault();
+        var rect=wrap.getBoundingClientRect();
+        var mx=e.clientX-rect.left,my=e.clientY-rect.top;
+        var ns=Math.max(0.25,Math.min(4,scale+(e.deltaY>0?-0.15:0.15)));
+        tx=mx-(mx-tx)*(ns/scale);ty=my-(my-ty)*(ns/scale);
+        scale=ns;apply();
+      },{passive:false});
+      wrap.addEventListener('mousedown',function(e){
+        if(e.target.closest('.graph-zoom-btn'))return;
+        dragging=true;hasMoved=false;
+        startX=e.clientX;startY=e.clientY;initTx=tx;initTy=ty;
+      });
+      window.addEventListener('mousemove',function(e){
+        if(!dragging)return;
+        var dx=e.clientX-startX,dy=e.clientY-startY;
+        if(Math.abs(dx)>2||Math.abs(dy)>2)hasMoved=true;
+        tx=initTx+dx;ty=initTy+dy;apply();
+      });
+      window.addEventListener('mouseup',function(){dragging=false;});
+      wrap.addEventListener('click',function(e){
+        if(hasMoved)return;
+        var node=e.target.closest('.graph-node');
+        if(!node)return;
+        var adrId=node.getAttribute('data-adr-id');
+        var ws=node.getAttribute('data-workspace');
+        if(adrId&&ws)showAdrDetail(ws,adrId);
+      });
+      var btns=wrap.querySelectorAll('.graph-zoom-btn');
+      if(btns[0])btns[0].addEventListener('click',function(e){e.stopPropagation();scale=Math.min(4,scale+0.3);apply();});
+      if(btns[1])btns[1].addEventListener('click',function(e){e.stopPropagation();scale=Math.max(0.25,scale-0.3);apply();});
+      if(btns[2])btns[2].addEventListener('click',function(e){e.stopPropagation();reset();});
+    })(wraps[gi]);}
+  })();
+  /* ---- init ---- */
+  setLens(body.getAttribute('data-default-lens')||'self');
+  applyHash();
 })();
 </script>
 </body></html>`;

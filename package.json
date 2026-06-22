@@ -1,6 +1,6 @@
 {
   "name": "@lim-young/inlay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Inlay — multi-agent collaboration pipeline for ADR + Context (conflict-free, local-first)",
   "type": "module",
   "bin": {
@@ -45,5 +45,9 @@
     "bin",
     "src",
     "skills"
-  ]
+  ],
+  "devDependencies": {
+    "@playwright/mcp": "^0.0.76",
+    "playwright": "^1.61.0"
+  }
 }

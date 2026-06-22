@@ -6,7 +6,7 @@ import { initProject } from '../src/init.js';
 import { createWorkspace, useWorkspace } from '../src/workspace.js';
 import { newAdr, touchAdr, listAdr } from '../src/adr.js';
 import { addContext } from '../src/context.js';
-import { scanProject, renderHtml, generateDashboard, annotateSupersession, mdToHtml } from '../src/dashboard.js';
+import { scanProject, renderHtml, generateDashboard, annotateSupersession, mdToHtml, buildSupersessionChains, buildActivitySparkline, buildHealthSummary, renderSparkline, renderBarChart, renderDonut, renderAdrListItems } from '../src/dashboard.js';
 
 const SID = 'sid';
 function setup() {
@@ -215,16 +215,18 @@ test('renderHtml provides Overview / ADR / Context panel navigation', () => {
   }
 });
 
-test('ADR panel folds superseded ADRs under their superseder', () => {
+test('ADR panel: superseded ADRs folded into chains in list view', () => {
   const root = setup();
   try {
     const b = listAdr({ root, sid: SID })[0].id; // existing "Use Node crypto"
     newAdr({ root, sid: SID, title: 'Use streaming hash', supersedes: [b], env: { INLAY_USER: 'A1' } });
     const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
-    // superseded B is nested in a collapse, not a top-level card
-    assert.match(html, /<details/, 'uses native collapse');
-    assert.match(html, new RegExp('data-superseded="' + b + '"'), 'B nested as superseded');
-    assert.ok(!new RegExp('data-adr-top="' + b + '"').test(html), 'B is not a top-level card');
+    // new format: superseded B is part of a chain, not a top-level list item
+    // The chain shows "2 versions" since A supersedes B
+    assert.match(html, /versions/, 'chain shows version count');
+    assert.match(html, /adr-list-item/, 'uses list item format');
+    // The superseded ADR IS in the model (in the inline JSON), just not as a separate top-level card
+    assert.ok(html.includes(b), 'superseded ADR id present in model');
   } finally {
     rm(root);
   }
@@ -281,6 +283,338 @@ test('generateDashboard writes a self-contained HTML file (no external deps) to 
   }
 });
 
+// buildSupersessionChains: TDD tracer bullet — single ADR → single-element chain
+test('buildSupersessionChains: single ADR forms a single-element chain', () => {
+  const chains = buildSupersessionChains([
+    { id: 'A', supersedes: [], related: [] },
+  ]);
+  assert.equal(chains.length, 1);
+  assert.equal(chains[0].versionCount, 1);
+  assert.equal(chains[0].latest.id, 'A');
+  assert.deepEqual(chains[0].versions.map((v) => v.id), ['A']);
+});
+
+test('buildSupersessionChains: A supersedes B → single chain, A is latest', () => {
+  const chains = buildSupersessionChains([
+    { id: 'A', supersedes: ['B'], related: [] },
+    { id: 'B', supersedes: [], related: [] },
+  ]);
+  assert.equal(chains.length, 1, 'A and B form one chain');
+  assert.equal(chains[0].versionCount, 2);
+  assert.equal(chains[0].latest.id, 'A');
+  assert.deepEqual(chains[0].versions.map((v) => v.id), ['A', 'B']);
+});
+
+test('buildSupersessionChains: A→B→C forms one chain, versions from newest to oldest', () => {
+  const chains = buildSupersessionChains([
+    { id: 'A', supersedes: ['B'], related: [] },
+    { id: 'B', supersedes: ['C'], related: [] },
+    { id: 'C', supersedes: [], related: [] },
+  ]);
+  assert.equal(chains.length, 1);
+  assert.equal(chains[0].versionCount, 3);
+  assert.equal(chains[0].latest.id, 'A');
+  assert.deepEqual(chains[0].versions.map((v) => v.id), ['A', 'B', 'C']);
+});
+
+test('buildSupersessionChains: independent ADRs form separate chains', () => {
+  const chains = buildSupersessionChains([
+    { id: 'A', supersedes: [], related: [] },
+    { id: 'B', supersedes: [], related: [] },
+    { id: 'C', supersedes: [], related: [] },
+  ]);
+  assert.equal(chains.length, 3);
+  for (const c of chains) {
+    assert.equal(c.versionCount, 1);
+    assert.equal(c.versions.length, 1);
+  }
+});
+
+test('buildSupersessionChains: cycle A↔B does not loop infinitely', () => {
+  const chains = buildSupersessionChains([
+    { id: 'A', supersedes: ['B'], related: [] },
+    { id: 'B', supersedes: ['A'], related: [] },
+  ]);
+  // Should produce chains without hanging
+  assert.ok(chains.length >= 1);
+  const allIds = chains.flatMap((c) => c.versions.map((v) => v.id));
+  assert.ok(allIds.includes('A'));
+  assert.ok(allIds.includes('B'));
+});
+
+test('buildSupersessionChains is a pure function (same input → same output)', () => {
+  const input = [
+    { id: 'A', supersedes: ['B'], related: [] },
+    { id: 'B', supersedes: [], related: [] },
+  ];
+  const r1 = buildSupersessionChains(input);
+  const r2 = buildSupersessionChains(input);
+  assert.deepEqual(r1, r2);
+});
+
+test('buildSupersessionChains: object refs in supersedes are resolved', () => {
+  const chains = buildSupersessionChains([
+    { id: 'A', supersedes: [{ id: 'B' }], related: [] },
+    { id: 'B', supersedes: [], related: [] },
+  ]);
+  assert.equal(chains.length, 1);
+  assert.equal(chains[0].latest.id, 'A');
+});
+
+// buildActivitySparkline: aggregate activity events by day (trailing N days)
+test('buildActivitySparkline: empty activity → all-zero counts for each day', () => {
+  const spark = buildActivitySparkline([], 7);
+  assert.equal(spark.length, 7);
+  assert.ok(spark.every((d) => d.count === 0), 'all days have count 0');
+});
+
+test('buildActivitySparkline: events counted on correct days', () => {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const events = [
+    { at: today + 'T10:00:00Z', user: 'A1', kind: 'created', adrId: 'X', workspace: 'w' },
+    { at: today + 'T11:00:00Z', user: 'A1', kind: 'touched', adrId: 'X', workspace: 'w' },
+    { at: today + 'T12:00:00Z', user: 'B2', kind: 'created', adrId: 'Y', workspace: 'w' },
+  ];
+  const spark = buildActivitySparkline(events, 14);
+  const last = spark[spark.length - 1]; // today
+  assert.equal(last.count, 3, 'three events today');
+});
+
+test('buildActivitySparkline returns stable trailing window', () => {
+  const spark = buildActivitySparkline([], 30);
+  assert.equal(spark.length, 30);
+  // dates should be in ascending order
+  for (let i = 1; i < spark.length; i++) {
+    assert.ok(spark[i].date >= spark[i - 1].date, 'dates are ascending');
+  }
+});
+
+test('buildActivitySparkline is a pure function', () => {
+  const events = [{ at: '2026-06-20T10:00:00Z', user: 'A1', kind: 'created', adrId: 'X', workspace: 'w' }];
+  assert.deepEqual(buildActivitySparkline(events, 7), buildActivitySparkline(events, 7));
+});
+
+// buildHealthSummary: aggregate workspace health status counts
+test('buildHealthSummary: all ok → counts reflect ok only', () => {
+  const summary = buildHealthSummary({
+    workspaces: [
+      { id: 'a', status: 'ok', problems: [] },
+      { id: 'b', status: 'ok', problems: [] },
+    ],
+  });
+  assert.equal(summary.ok, 2);
+  assert.equal(summary.orphan, 0);
+  assert.equal(summary.broken, 0);
+  assert.equal(summary.total, 2);
+});
+
+test('buildHealthSummary: mixed statuses counted correctly', () => {
+  const summary = buildHealthSummary({
+    workspaces: [
+      { id: 'a', status: 'ok', problems: [] },
+      { id: 'b', status: 'orphan', problems: [] },
+      { id: 'c', status: 'broken', problems: ['bad ref'] },
+    ],
+  });
+  assert.equal(summary.ok, 1);
+  assert.equal(summary.orphan, 1);
+  assert.equal(summary.broken, 1);
+  assert.equal(summary.total, 3);
+});
+
+test('buildHealthSummary: empty health → all zeros', () => {
+  const summary = buildHealthSummary({ workspaces: [] });
+  assert.equal(summary.ok, 0);
+  assert.equal(summary.orphan, 0);
+  assert.equal(summary.broken, 0);
+  assert.equal(summary.total, 0);
+});
+
+test('buildHealthSummary: handles missing health gracefully', () => {
+  const summary = buildHealthSummary(null);
+  assert.equal(summary.ok, 0);
+  assert.equal(summary.total, 0);
+});
+
+test('scanProject includes supersessionChains per workspace', () => {
+  const root = setup();
+  try {
+    const model = scanProject({ root, currentUser: 'A1' });
+    const ws = model.workspaces.find((w) => w.id === 'hashcalc');
+    assert.ok(Array.isArray(ws.supersessionChains));
+    assert.ok(ws.supersessionChains.length >= 1);
+    const chain = ws.supersessionChains[0];
+    assert.ok('latest' in chain);
+    assert.ok('versions' in chain);
+    assert.ok('versionCount' in chain);
+    assert.equal(chain.versionCount, chain.versions.length);
+  } finally {
+    rm(root);
+  }
+});
+
+test('scanProject includes activitySparkline and healthSummary', () => {
+  const root = setup();
+  try {
+    const model = scanProject({ root, currentUser: 'A1' });
+    assert.ok(Array.isArray(model.activitySparkline));
+    assert.ok(model.activitySparkline.length > 0, 'sparkline has data points');
+    assert.ok(model.activitySparkline.every((d) => 'date' in d && 'count' in d));
+    assert.ok(model.healthSummary);
+    assert.ok('ok' in model.healthSummary);
+    assert.ok('orphan' in model.healthSummary);
+    assert.ok('broken' in model.healthSummary);
+    assert.ok('total' in model.healthSummary);
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml uses CSS custom properties (no legacy hardcoded colors)', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    // new color system uses --in-color-* variables
+    assert.match(html, /--in-color-/);
+    // legacy GitHub-style hardcoded hex colors should be absent
+    assert.ok(!/#0d1117/.test(html), 'no legacy bg color');
+    assert.ok(!/#161b22/.test(html), 'no legacy surface color');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml uses Fira Code + Fira Sans font stack', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.match(html, /Fira Code/);
+    assert.match(html, /Fira Sans/);
+    // system fallbacks for accessibility
+    assert.match(html, /Consolas/);
+    assert.match(html, /Segoe UI/);
+  } finally {
+    rm(root);
+  }
+});
+
+// SVG chart renderers
+test('renderSparkline: empty data → empty string', () => {
+  assert.equal(renderSparkline([]), '');
+});
+
+test('renderSparkline: produces valid SVG with data points', () => {
+  const data = [
+    { date: '2026-06-20', count: 1 },
+    { date: '2026-06-21', count: 3 },
+    { date: '2026-06-22', count: 0 },
+  ];
+  const svg = renderSparkline(data);
+  assert.ok(svg.includes('<svg'));
+  assert.ok(svg.includes('viewBox'));
+  assert.ok(svg.includes('role="img"'));
+  assert.ok(svg.includes('<title>'));
+  assert.ok(svg.includes('<polyline'));
+});
+
+test('renderSparkline: zero-count data renders flat line', () => {
+  const data = [
+    { date: '2026-06-20', count: 0 },
+    { date: '2026-06-21', count: 0 },
+  ];
+  const svg = renderSparkline(data);
+  assert.ok(svg.includes('<polyline')); // still renders, just at zero
+});
+
+test('renderBarChart: empty contributions → empty string', () => {
+  assert.equal(renderBarChart([]), '');
+});
+
+test('renderBarChart: produces valid SVG with bar for each contributor', () => {
+  const contribs = [{ user: 'A1', created: 5, touched: 2 }];
+  const svg = renderBarChart(contribs);
+  assert.ok(svg.includes('<svg'));
+  assert.ok(svg.includes('role="img"'));
+  assert.ok(svg.includes('<title>'));
+  assert.ok(svg.includes('A1')); // user label
+  assert.ok(svg.includes('5')); // created count
+});
+
+test('renderDonut: produces valid SVG with segments', () => {
+  const svg = renderDonut(3, 1, 0);
+  assert.ok(svg.includes('<svg'));
+  assert.ok(svg.includes('role="img"'));
+  assert.ok(svg.includes('3')); // ok count
+  assert.ok(svg.includes('1')); // orphan count
+  assert.ok(svg.includes('0')); // broken count
+});
+
+test('renderDonut: all-zero renders empty ring', () => {
+  const svg = renderDonut(0, 0, 0);
+  assert.ok(svg.includes('<svg'));
+});
+
+test('renderBarChart: sorts by created count descending', () => {
+  const contribs = [
+    { user: 'B', created: 1, touched: 5 },
+    { user: 'A', created: 10, touched: 1 },
+  ];
+  const svg = renderBarChart(contribs);
+  // ">A<" in text element vs ">B<" — text label position in SVG
+  const ai = svg.indexOf('>A<');
+  const bi = svg.indexOf('>B<');
+  assert.ok(ai >= 0 && bi >= 0, 'both labels present');
+  assert.ok(ai < bi, 'A (10 created) rendered before B (1 created)');
+});
+
+// Phase 3: ADR list view renders compact items from supersession chains
+test('renderAdrListItems: empty chains → empty string', () => {
+  assert.equal(renderAdrListItems([]), '');
+});
+
+test('renderAdrListItems: single chain → one list item with title and status', () => {
+  const chains = [
+    {
+      latest: { id: 'ADR-1', title: 'Use crypto', status: 'accepted', createdBy: 'A1', createdAt: '2026-06-01' },
+      versions: [{ id: 'ADR-1', title: 'Use crypto', status: 'accepted', createdBy: 'A1', createdAt: '2026-06-01' }],
+      versionCount: 1,
+    },
+  ];
+  const html = renderAdrListItems(chains);
+  assert.ok(html.includes('Use crypto'));
+  assert.ok(html.includes('accepted'));
+  assert.ok(html.includes('adr-list-item'));
+});
+
+test('renderAdrListItems: multi-version chain shows version count', () => {
+  const chains = [
+    {
+      latest: { id: 'ADR-1', title: 'Use crypto', status: 'accepted', createdBy: 'A1', createdAt: '2026-06-02' },
+      versions: [
+        { id: 'ADR-1', title: 'Use crypto', status: 'accepted', createdBy: 'A1', createdAt: '2026-06-02' },
+        { id: 'ADR-0', title: 'Old approach', status: 'superseded', createdBy: 'A1', createdAt: '2026-06-01' },
+      ],
+      versionCount: 2,
+    },
+  ];
+  const html = renderAdrListItems(chains);
+  assert.ok(html.includes('2'), 'shows version count');
+  assert.ok(html.includes('history'), 'references history');
+});
+
+test('renderAdrListItems: respects workspace id for linking', () => {
+  const chains = [
+    {
+      latest: { id: 'ADR-1', title: 'Test', status: 'proposed', createdBy: 'A1', createdAt: '2026-06-01' },
+      versions: [{ id: 'ADR-1', title: 'Test', status: 'proposed', createdBy: 'A1', createdAt: '2026-06-01' }],
+      versionCount: 1,
+    },
+  ];
+  const html = renderAdrListItems(chains, 'myws');
+  assert.ok(html.includes('myws'));
+  assert.ok(html.includes('ADR-1'));
+});
+
 test('generateDashboard threads currentUser into the model and stays read-only', () => {
   const root = setup();
   try {
@@ -292,6 +626,136 @@ test('generateDashboard threads currentUser into the model and stays read-only',
     // read-only: the produced file lives under outDir, not the repo tree
     assert.ok(r.path.startsWith(outDir));
     assert.equal(before, true);
+  } finally {
+    rm(root);
+  }
+});
+
+// ---- Phase 4: ADR list view + detail view rendering (4.1) ----
+test('renderAdrListItems: multi-version chain includes chain-history container and toggle', () => {
+  const chains = [
+    {
+      latest: { id: 'ADR-1', title: 'Use crypto', status: 'accepted', createdBy: 'A1', createdAt: '2026-06-02' },
+      versions: [
+        { id: 'ADR-1', title: 'Use crypto', status: 'accepted', createdBy: 'A1', createdAt: '2026-06-02' },
+        { id: 'ADR-0', title: 'Old approach', status: 'superseded', createdBy: 'A1', createdAt: '2026-06-01' },
+      ],
+      versionCount: 2,
+    },
+  ];
+  const html = renderAdrListItems(chains);
+  assert.ok(html.includes('chain-toggle'), 'has expandable toggle for multi-version chain');
+  assert.ok(html.includes('aria-expanded="false"'), 'toggle starts collapsed');
+  assert.ok(html.includes('chain-history'), 'has hidden history container');
+  assert.ok(html.includes('chain-history-item'), 'includes historical version items');
+  assert.ok(html.includes('Old approach'), 'historical ADR title visible in markup');
+});
+
+test('renderHtml: ADR panel includes list view, detail view, back button, and breadcrumb', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes('adr-list-view'), 'has ADR list view container');
+    assert.ok(html.includes('adr-detail-view'), 'has ADR detail view container');
+    assert.ok(html.includes('adr-back-btn'), 'has back button');
+    assert.ok(html.includes('adr-breadcrumb'), 'has breadcrumb element');
+    assert.ok(html.includes('adr-detail-content'), 'has detail content area');
+    assert.ok(html.includes('adr-timeline'), 'has timeline area');
+  } finally {
+    rm(root);
+  }
+});
+
+// ---- Phase 4: hash routing, back navigation, breadcrumb (4.8) ----
+test('renderHtml: includes hash routing logic (applyHash, readHash, updateHash)', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes('applyHash'), 'has hash apply function');
+    assert.ok(html.includes('readHash'), 'has hash read function');
+    assert.ok(html.includes('updateHash'), 'has hash update function');
+    assert.ok(html.includes('showAdrDetail'), 'has ADR detail function');
+    assert.ok(html.includes('showAdrList'), 'has ADR list function');
+    assert.ok(html.includes('hashchange'), 'listens to hashchange');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml: includes chain toggle script handlers', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes('chain-toggle'), 'has chain toggle selector');
+    assert.ok(html.includes('chain-history-item'), 'has chain history item selector');
+    assert.ok(html.includes('e.stopPropagation()'), 'has stopPropagation for toggle clicks');
+  } finally {
+    rm(root);
+  }
+});
+
+// ---- Phase 5: table sorting, keyboard shortcuts, full-text search (5.1) ----
+test('renderHtml: includes table column sorting logic', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes("aria-sort"), 'has aria-sort attribute');
+    assert.ok(html.includes('ascending'), 'has ascending sort direction');
+    assert.ok(html.includes('descending'), 'has descending sort direction');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml: includes keyboard shortcut bindings for all panels', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes("key==='1'"), 'has key 1 binding (overview)');
+    assert.ok(html.includes("key==='2'"), 'has key 2 binding (adr)');
+    assert.ok(html.includes("key==='3'"), 'has key 3 binding (context)');
+    assert.ok(html.includes("key==='/'"), 'has / binding (search focus)');
+    assert.ok(html.includes("key==='Escape'"), 'has Escape binding (back/close)');
+    assert.ok(html.includes("key==='?'"), 'has ? binding (help)');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml: includes full-text search over ADR body logic', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes('bodyMatch'), 'has body match set for full-text search');
+    assert.ok(html.includes('adr.body'), 'searches ADR body property');
+    assert.ok(html.includes('matchesBody'), 'has body match flag');
+    assert.ok(html.includes('setTimeout(applyFilters,150)'), 'debounced search at 150ms');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml: includes code copy button logic', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes('copy-btn'), 'has copy button class');
+    assert.ok(html.includes('navigator.clipboard.writeText'), 'uses clipboard API');
+    assert.ok(html.includes('icon-check'), 'has check icon for copied feedback');
+  } finally {
+    rm(root);
+  }
+});
+
+test('renderHtml: graph has zoom/pan and node click navigation', () => {
+  const root = setup();
+  try {
+    const html = renderHtml(scanProject({ root, currentUser: 'A1' }));
+    assert.ok(html.includes('graph-wrap'), 'has graph container');
+    assert.ok(html.includes('graph-node'), 'has graph node elements');
+    assert.ok(html.includes('graph-controls'), 'has graph zoom controls');
+    assert.ok(html.includes('graph-zoom-btn'), 'has zoom buttons');
+    assert.ok(html.includes('hasMoved'), 'distinguishes drag from click');
   } finally {
     rm(root);
   }
